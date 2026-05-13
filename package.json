@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @map3d/app dev",
+    "dev:wasm": "pnpm --filter @map3d/wasm-client dev",
+    "dev:server": "pnpm --filter @map3d/data-server start",
     "build": "pnpm -r build",
+    "build:city": "bash scripts/build-city-wasm.sh",
+    "build:city:podman": "bash scripts/build-city-podman.sh",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint"
   },

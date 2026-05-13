@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Flecs/WASM build artefacts (produced by scripts/build-city-wasm.sh)
+external/city/.bake_cache
+external/city/etc/city.js
+external/city/etc/city.wasm
+packages/wasm-client/public/flecs/city.js
+packages/wasm-client/public/flecs/city.wasm
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

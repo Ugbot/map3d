@@ -1,0 +1,39 @@
+# Container image with bake + Emscripten preinstalled, used to build the
+# Flecs/sokol city to WebAssembly without polluting the host. Build with:
+#   podman build -t localhost/map3d-city-build -f Containerfile.city-build .
+# Then drive via scripts/build-city-podman.sh.
+
+FROM docker.io/library/debian:bookworm-slim AS base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    EMSDK=/opt/emsdk \
+    PATH=/opt/emsdk:/opt/emsdk/upstream/emscripten:/opt/bake/bake:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git python3 build-essential cmake \
+        bash xz-utils unzip pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- emsdk ----------------------------------------------------------------
+ARG EMSDK_VERSION=3.1.66
+RUN git clone --depth 1 https://github.com/emscripten-core/emsdk.git /opt/emsdk \
+ && cd /opt/emsdk \
+ && ./emsdk install ${EMSDK_VERSION} \
+ && ./emsdk activate ${EMSDK_VERSION}
+
+# --- bake -----------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/SanderMertens/bake.git /opt/bake \
+ && cd /opt/bake \
+ && ./setup.sh --local
+
+# Drop into bash with the emsdk env sourced. bake builds invoke emcc via
+# the activated emsdk environment.
+ENV BAKE_HOME=/opt/bake \
+    BAKE_TARGET=/opt/bake/target
+
+WORKDIR /work
+SHELL ["/bin/bash", "-lc"]
+RUN echo "source /opt/emsdk/emsdk_env.sh >/dev/null 2>&1" >> /root/.bashrc
+
+ENTRYPOINT ["/bin/bash", "-lc"]
+CMD ["bash"]
