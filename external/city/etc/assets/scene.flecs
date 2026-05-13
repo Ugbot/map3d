@@ -1,0 +1,48 @@
+using flecs.components.*
+using flecs.city
+using flecs.game
+
+city {
+  City: {
+    blocks_x: 25
+    blocks_y: 18
+    block_width: 15
+    block_height: 25
+    road_width: 6
+
+    buildings: {
+      min_height: 3
+      max_height: 160
+      x_variation: 0.5
+      y_variation: 2.0
+      small_height: 50
+
+      modern_chance: 0.3
+      skyscraper_chance: 0.2
+      backyard_chance: 1.0
+    }
+
+    parks: {
+      chance: 0.3,
+      tree_chance: 0.6
+      plaza_chance: 0.1
+      tree_count: 4
+    }
+
+    props: {
+      chance: 0.7
+      tree_chance: 0.5
+      bin_chance: 0.09
+      hydrant_chance: 0.03
+      bench_chance: 0.08
+    }
+
+    traffic: {
+      frequency: 5
+      speed: 10
+      chance: 0.02
+    }
+
+    lanterns: true
+  }
+}
