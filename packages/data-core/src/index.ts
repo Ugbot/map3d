@@ -13,3 +13,5 @@ export * from "./codec/FrameCodec";
 export * from "./transport/Transport";
 export * from "./util/assert";
 export * from "./util/rng";
+// Re-export bitecs primitives so consumers don't need a separate bitecs dep.
+export { query, addEntity, removeEntity, addComponents, removeComponents } from "bitecs";

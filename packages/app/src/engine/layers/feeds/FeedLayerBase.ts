@@ -1,63 +1,47 @@
 // Shared base for live-feed layers (aircraft, vessels).
 //
-// Owns:
-//   - InstancedMesh of the agent shape, capacity slots reused as entities come
-//     and go.
-//   - A shared LineSegments mesh for trails: one big BufferGeometry per kind
-//     with pre-allocated position + RGBA colour attributes, draw range updated
-//     each frame.
-//
-// Per-frame `update` does dead reckoning on (heading, speed, vertical_rate)
-// since the last source observation, then samples the position into the
-// per-entity ring buffer (gated to one sample per `trailSampleS`).
+// Reads entity state directly from the data-core bitECS world each frame —
+// no local state map, no dead-reckoning. Trails are owned here (rendering
+// concern, not data) as per-eid ring buffers.
 
 import * as THREE from "three";
 import { MeshStandardNodeMaterial, LineBasicNodeMaterial } from "three/webgpu";
 import type { Layer, LayerContext, TileMeshHandle } from "../../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../../cache/types";
-import type { FeedEntity } from "../../../feeds/types";
-import { lonLatToMeters } from "../../../projection/mercator";
-
-const EARTH_R = 6378137;
+import {
+  FLAG_IS_FEED,
+  FLAG_ON_GROUND,
+  query,
+  type Map3dWorld,
+} from "@map3d/data-core";
 
 export interface FeedLayerOpts {
   name: LayerName;
+  /** Kind code in the world (KIND_FEED_AIRCRAFT / KIND_FEED_VESSEL). */
+  kindCode: number;
   capacity: number;
   agentGeometry: THREE.BufferGeometry;
   agentMaterial: MeshStandardNodeMaterial;
-  /** Trail tuning. */
   trailMaxSamples: number;
   trailSampleS: number;
   trailColor: THREE.Color;
-  /** How long without a fresh update before we age out the entity. */
-  inactiveAfterS: number;
-  /** Hook to map FeedEntity → display Y in metres (e.g. altitude for planes,
-   *  fixed water height for vessels). */
-  yForEntity: (e: FeedEntity) => number;
-  /** Should this entity render at all (e.g. hide on-ground aircraft). */
-  shouldRender: (e: FeedEntity) => boolean;
+  /** Override Y for entity scene position (e.g. fixed water height for vessels).
+   *  Returning null = use world's Position.y unchanged. */
+  yOverride: ((worldY: number) => number) | null;
+  /** Hide an entity when on-ground flag set (aircraft only). */
+  hideOnGround: boolean;
 }
 
-interface State {
-  id: string;
-  lon: number;
-  lat: number;
-  altM: number;
-  headingDeg: number;
-  speedMs: number;
-  verticalMs: number;
-  obsTs: number;
-  ts: number;
-  /** Last frame's dead-reckoned scene-local coords. */
-  sx: number;
-  sy: number;
-  sz: number;
-  slot: number;
-  /** Ring buffer: positions × maxTrail, each (sx, sy, sz, ts). */
-  trail: Float32Array;
-  trailCount: number;
-  trailHead: number;
+interface Trail {
+  /** Ring of (sx, sy, sz, ts) floats. */
+  ring: Float32Array;
+  count: number;
+  head: number;
   lastSampleS: number;
+  /** Last seen position so we can stitch the live segment. */
+  lastX: number;
+  lastY: number;
+  lastZ: number;
 }
 
 export class FeedLayerBase implements Layer {
@@ -71,13 +55,12 @@ export class FeedLayerBase implements Layer {
   private trailPos: Float32Array;
   private trailCol: Float32Array;
   private trailGeom: THREE.BufferGeometry;
-  private states = new Map<string, State>();
-  private freeSlots: number[];
-  private sceneOrigin: { x: number; y: number } = { x: 0, y: 0 };
+  private trails = new Map<number, Trail>();
+  private world: Map3dWorld | null = null;
+  /** Re-used per-frame to detect entities that disappeared. */
+  private seenEids = new Set<number>();
   private dummy = new THREE.Object3D();
-  private tmpColor = new THREE.Color();
-  // Throttle trail mesh rebuild to ~5 Hz; rebuilding 60×/s was a chunk of
-  // main-thread CPU for no visible benefit.
+  private activeCount = 0;
   private lastTrailRebuildMs = 0;
   private static readonly TRAIL_REBUILD_MS = 200;
 
@@ -92,8 +75,7 @@ export class FeedLayerBase implements Layer {
     this.mesh.userData.layer = opts.name;
     this.root.add(this.mesh);
 
-    // Trail geometry: capacity × (maxTrail - 1) segments × 2 verts × 3 floats.
-    const segCount = opts.capacity * (opts.trailMaxSamples - 1);
+    const segCount = opts.capacity * (opts.trailMaxSamples - 1 + 1);
     const vertCount = segCount * 2;
     this.trailPos = new Float32Array(vertCount * 3);
     this.trailCol = new Float32Array(vertCount * 4);
@@ -109,68 +91,14 @@ export class FeedLayerBase implements Layer {
     this.trailMesh = new THREE.LineSegments(this.trailGeom, trailMat);
     this.trailMesh.frustumCulled = false;
     this.root.add(this.trailMesh);
-
-    this.freeSlots = new Array(opts.capacity);
-    for (let i = 0; i < opts.capacity; i++) this.freeSlots[i] = opts.capacity - 1 - i;
   }
 
-  setSceneOrigin(o: { x: number; y: number }) {
-    this.sceneOrigin = o;
+  setWorld(world: Map3dWorld) {
+    this.world = world;
   }
 
-  /** Push a fresh observation. */
-  pushUpdate(e: FeedEntity) {
-    if (!this.opts.shouldRender(e)) {
-      this.remove(e.id);
-      return;
-    }
-    let s = this.states.get(e.id);
-    if (!s) {
-      const slot = this.freeSlots.pop();
-      if (slot === undefined) return; // capacity hit
-      s = {
-        id: e.id,
-        lon: e.lon,
-        lat: e.lat,
-        altM: e.altM ?? 0,
-        headingDeg: e.headingDeg,
-        speedMs: e.speedMs,
-        verticalMs: e.verticalMs ?? 0,
-        obsTs: e.ts,
-        ts: e.ts,
-        sx: 0,
-        sy: 0,
-        sz: 0,
-        slot,
-        trail: new Float32Array(this.opts.trailMaxSamples * 4),
-        trailCount: 0,
-        trailHead: 0,
-        lastSampleS: -Infinity,
-      };
-      this.states.set(e.id, s);
-    } else {
-      s.lon = e.lon;
-      s.lat = e.lat;
-      s.altM = e.altM ?? 0;
-      s.headingDeg = e.headingDeg;
-      s.speedMs = e.speedMs;
-      s.verticalMs = e.verticalMs ?? 0;
-      s.obsTs = e.ts;
-      s.ts = e.ts;
-    }
-  }
-
-  /** Remove an entity. */
-  remove(id: string) {
-    const s = this.states.get(id);
-    if (!s) return;
-    this.freeSlots.push(s.slot);
-    this.states.delete(id);
-  }
-
-  // ── Layer interface ──
   load(_tile: ParsedTile, _g: LayerGeometry, _ctx: LayerContext): TileMeshHandle | null {
-    return null; // feed-driven, not tile-driven
+    return null;
   }
   setVisible(v: boolean): void {
     this.root.visible = v;
@@ -181,70 +109,83 @@ export class FeedLayerBase implements Layer {
   }
 
   update(_t: number, sunAltitude: number, glow: number): void {
-    const wallNow = Date.now();
-    const nowS = wallNow / 1000;
-    const aged: string[] = [];
+    if (!this.world) return;
+    const c = this.world.components;
+    const Position = c.Position;
+    const Heading = c.Heading;
+    const Kind = c.Kind;
+    const Flags = c.Flags;
+
+    const nowMs = Date.now();
+    const nowS = nowMs / 1000;
+    const targetKind = this.opts.kindCode;
+    const cap = this.opts.capacity;
+    const seen = this.seenEids;
+    seen.clear();
     let active = 0;
 
-    for (const s of this.states.values()) {
-      const age = (wallNow - s.obsTs) / 1000;
-      if (age > this.opts.inactiveAfterS) {
-        aged.push(s.id);
-        continue;
-      }
-      // Dead reckon since last observation.
-      const headingRad = (s.headingDeg * Math.PI) / 180;
-      const dLat = (s.speedMs * age * Math.cos(headingRad)) / EARTH_R;
-      const dLon =
-        (s.speedMs * age * Math.sin(headingRad)) /
-        (EARTH_R * Math.max(0.05, Math.cos((s.lat * Math.PI) / 180)));
-      const lat = s.lat + (dLat * 180) / Math.PI;
-      const lon = s.lon + (dLon * 180) / Math.PI;
-      const altM = Math.max(0, s.altM + s.verticalMs * age);
-      const m = lonLatToMeters(lon, lat);
-      s.sx = m.x - this.sceneOrigin.x;
-      s.sz = -(m.y - this.sceneOrigin.y);
-      s.sy = this.opts.yForEntity({
-        id: s.id,
-        kind: this.opts.name === "aircraft" ? "aircraft" : "vessel",
-        lat,
-        lon,
-        altM,
-        headingDeg: s.headingDeg,
-        speedMs: s.speedMs,
-        verticalMs: s.verticalMs,
-        ts: s.ts,
-      });
+    for (const eid of query(this.world, [Position, Heading, Kind, Flags])) {
+      if ((Flags.bits[eid] & FLAG_IS_FEED) === 0) continue;
+      if (Kind.value[eid] !== targetKind) continue;
+      if (this.opts.hideOnGround && (Flags.bits[eid] & FLAG_ON_GROUND) !== 0) continue;
+      if (active >= cap) break;
+      seen.add(eid);
 
-      // Sample trail at the configured cadence.
-      if (nowS - s.lastSampleS >= this.opts.trailSampleS) {
-        s.lastSampleS = nowS;
-        const off = s.trailHead * 4;
-        s.trail[off + 0] = s.sx;
-        s.trail[off + 1] = s.sy;
-        s.trail[off + 2] = s.sz;
-        s.trail[off + 3] = nowS;
-        s.trailHead = (s.trailHead + 1) % this.opts.trailMaxSamples;
-        s.trailCount = Math.min(s.trailCount + 1, this.opts.trailMaxSamples);
+      const sx = Position.x[eid];
+      const rawY = Position.y[eid];
+      const sy = this.opts.yOverride ? this.opts.yOverride(rawY) : rawY;
+      const sz = Position.z[eid];
+      const heading = Heading.angle[eid];
+
+      let trail = this.trails.get(eid);
+      if (!trail) {
+        trail = {
+          ring: new Float32Array(this.opts.trailMaxSamples * 4),
+          count: 0,
+          head: 0,
+          lastSampleS: -Infinity,
+          lastX: sx,
+          lastY: sy,
+          lastZ: sz,
+        };
+        this.trails.set(eid, trail);
+      }
+      trail.lastX = sx;
+      trail.lastY = sy;
+      trail.lastZ = sz;
+      if (nowS - trail.lastSampleS >= this.opts.trailSampleS) {
+        trail.lastSampleS = nowS;
+        const off = trail.head * 4;
+        trail.ring[off + 0] = sx;
+        trail.ring[off + 1] = sy;
+        trail.ring[off + 2] = sz;
+        trail.ring[off + 3] = nowS;
+        trail.head = (trail.head + 1) % this.opts.trailMaxSamples;
+        if (trail.count < this.opts.trailMaxSamples) trail.count++;
       }
 
-      this.dummy.position.set(s.sx, s.sy, s.sz);
-      this.dummy.rotation.set(0, headingRad, 0);
+      this.dummy.position.set(sx, sy, sz);
+      this.dummy.rotation.set(0, heading, 0);
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(active, this.dummy.matrix);
       active++;
     }
     this.mesh.count = active;
     this.mesh.instanceMatrix.needsUpdate = true;
+    this.activeCount = active;
 
-    for (const id of aged) this.remove(id);
+    // Drop trails for entities that disappeared from the world.
+    if (this.trails.size > seen.size) {
+      for (const eid of this.trails.keys()) {
+        if (!seen.has(eid)) this.trails.delete(eid);
+      }
+    }
 
-    if (wallNow - this.lastTrailRebuildMs >= FeedLayerBase.TRAIL_REBUILD_MS) {
-      this.lastTrailRebuildMs = wallNow;
+    if (nowMs - this.lastTrailRebuildMs >= FeedLayerBase.TRAIL_REBUILD_MS) {
+      this.lastTrailRebuildMs = nowMs;
       this.rebuildTrails(nowS);
     }
 
-    // Night-glow: fades in when sun below horizon.
     const night = Math.max(0, -sunAltitude);
     this.material.emissiveIntensity = 0.1 + night * 1.4 * glow;
   }
@@ -252,32 +193,49 @@ export class FeedLayerBase implements Layer {
   private rebuildTrails(nowS: number) {
     const maxAge = this.opts.trailMaxSamples * this.opts.trailSampleS;
     const c = this.opts.trailColor;
-    let v = 0; // vertex cursor
-    for (const s of this.states.values()) {
-      if (s.trailCount < 2) continue;
-      // Walk samples oldest-to-newest, emitting segments between consecutive
-      // valid samples. With a ring buffer, oldest is at (head - count) mod N.
-      const N = this.opts.trailMaxSamples;
-      const startIdx = (s.trailHead - s.trailCount + N) % N;
-      for (let i = 0; i < s.trailCount - 1; i++) {
+    const N = this.opts.trailMaxSamples;
+    const posCap = this.trailPos.length / 3;
+    let v = 0;
+    for (const trail of this.trails.values()) {
+      if (trail.count < 2) {
+        // Still draw a single segment to the live position if we have one sample.
+        if (trail.count === 1 && v + 2 <= posCap) {
+          const startIdx = (trail.head - 1 + N) % N;
+          const off = startIdx * 4;
+          const fA = Math.max(0, 1 - (nowS - trail.ring[off + 3]) / maxAge);
+          this.trailPos[v * 3 + 0] = trail.ring[off + 0];
+          this.trailPos[v * 3 + 1] = trail.ring[off + 1];
+          this.trailPos[v * 3 + 2] = trail.ring[off + 2];
+          this.trailPos[v * 3 + 3] = trail.lastX;
+          this.trailPos[v * 3 + 4] = trail.lastY;
+          this.trailPos[v * 3 + 5] = trail.lastZ;
+          this.trailCol[v * 4 + 0] = c.r;
+          this.trailCol[v * 4 + 1] = c.g;
+          this.trailCol[v * 4 + 2] = c.b;
+          this.trailCol[v * 4 + 3] = fA * fA;
+          this.trailCol[v * 4 + 4] = c.r;
+          this.trailCol[v * 4 + 5] = c.g;
+          this.trailCol[v * 4 + 6] = c.b;
+          this.trailCol[v * 4 + 7] = 1;
+          v += 2;
+        }
+        continue;
+      }
+      const startIdx = (trail.head - trail.count + N) % N;
+      for (let i = 0; i < trail.count - 1; i++) {
+        if (v + 2 > posCap) break;
         const a = (startIdx + i) % N;
         const b = (startIdx + i + 1) % N;
         const aOff = a * 4;
         const bOff = b * 4;
-        const tA = s.trail[aOff + 3];
-        const tB = s.trail[bOff + 3];
-        const ageA = nowS - tA;
-        const ageB = nowS - tB;
-        const fA = Math.max(0, 1 - ageA / maxAge);
-        const fB = Math.max(0, 1 - ageB / maxAge);
-        // Position
-        this.trailPos[v * 3 + 0] = s.trail[aOff + 0];
-        this.trailPos[v * 3 + 1] = s.trail[aOff + 1];
-        this.trailPos[v * 3 + 2] = s.trail[aOff + 2];
-        this.trailPos[v * 3 + 3] = s.trail[bOff + 0];
-        this.trailPos[v * 3 + 4] = s.trail[bOff + 1];
-        this.trailPos[v * 3 + 5] = s.trail[bOff + 2];
-        // Colour (RGBA), alpha falls off with age² for a punchier "newest is brightest" curve
+        const fA = Math.max(0, 1 - (nowS - trail.ring[aOff + 3]) / maxAge);
+        const fB = Math.max(0, 1 - (nowS - trail.ring[bOff + 3]) / maxAge);
+        this.trailPos[v * 3 + 0] = trail.ring[aOff + 0];
+        this.trailPos[v * 3 + 1] = trail.ring[aOff + 1];
+        this.trailPos[v * 3 + 2] = trail.ring[aOff + 2];
+        this.trailPos[v * 3 + 3] = trail.ring[bOff + 0];
+        this.trailPos[v * 3 + 4] = trail.ring[bOff + 1];
+        this.trailPos[v * 3 + 5] = trail.ring[bOff + 2];
         this.trailCol[v * 4 + 0] = c.r;
         this.trailCol[v * 4 + 1] = c.g;
         this.trailCol[v * 4 + 2] = c.b;
@@ -288,20 +246,17 @@ export class FeedLayerBase implements Layer {
         this.trailCol[v * 4 + 7] = fB * fB;
         v += 2;
       }
-      // Also emit a segment from the newest sample to the live position so
-      // the trail visually meets the moving entity.
-      const lastIdx = (s.trailHead - 1 + N) % N;
-      const lOff = lastIdx * 4;
-      const tL = s.trail[lOff + 3];
-      const ageL = nowS - tL;
-      const fL = Math.max(0, 1 - ageL / maxAge);
-      if (v + 2 <= this.trailPos.length / 3) {
-        this.trailPos[v * 3 + 0] = s.trail[lOff + 0];
-        this.trailPos[v * 3 + 1] = s.trail[lOff + 1];
-        this.trailPos[v * 3 + 2] = s.trail[lOff + 2];
-        this.trailPos[v * 3 + 3] = s.sx;
-        this.trailPos[v * 3 + 4] = s.sy;
-        this.trailPos[v * 3 + 5] = s.sz;
+      // Live segment to the entity's current position.
+      if (v + 2 <= posCap) {
+        const lastIdx = (trail.head - 1 + N) % N;
+        const lOff = lastIdx * 4;
+        const fL = Math.max(0, 1 - (nowS - trail.ring[lOff + 3]) / maxAge);
+        this.trailPos[v * 3 + 0] = trail.ring[lOff + 0];
+        this.trailPos[v * 3 + 1] = trail.ring[lOff + 1];
+        this.trailPos[v * 3 + 2] = trail.ring[lOff + 2];
+        this.trailPos[v * 3 + 3] = trail.lastX;
+        this.trailPos[v * 3 + 4] = trail.lastY;
+        this.trailPos[v * 3 + 5] = trail.lastZ;
         this.trailCol[v * 4 + 0] = c.r;
         this.trailCol[v * 4 + 1] = c.g;
         this.trailCol[v * 4 + 2] = c.b;
@@ -316,10 +271,9 @@ export class FeedLayerBase implements Layer {
     this.trailGeom.setDrawRange(0, v);
     (this.trailGeom.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
     (this.trailGeom.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
-    void this.tmpColor;
   }
 
   countActive(): number {
-    return this.states.size;
+    return this.activeCount;
   }
 }

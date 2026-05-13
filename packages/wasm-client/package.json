@@ -5,14 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "copy-wasm": "node scripts/copy-wasm.mjs"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@map3d/data-core": "workspace:*"
   },
   "devDependencies": {
-    "vite": "^6.1.0"
+    "vite": "^6.1.0",
+    "typescript": "~5.7.2"
   }
 }

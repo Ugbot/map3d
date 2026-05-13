@@ -1,10 +1,9 @@
 // Vanilla Three.js engine — owns the scene, camera, renderer, animation loop,
 // layer registry, tile manager, picking, day/night, shadows, keyboard.
 //
-// Composability:
-//   - Layers come in as a Record<LayerName,Layer> (swappable per layer).
-//   - Tiles come via WorkerPool + TileStore + a TileProvider config.
-//   - Sim is a separate module that consumes tile lines and renders agents.
+// As of the data-core unification, the simulation and feed entities live in
+// a single bitECS world owned by @map3d/data-core. Engine drives that world
+// each frame and renders out of its component columns.
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -19,13 +18,26 @@ import type { LayerName } from "../cache/types";
 import { tileCache, makeVersion } from "../cache/tileCache";
 import { WorkerPool } from "../workers/pool";
 import { Sun } from "./time/Sun";
-import { Simulation } from "./sim/Simulation";
-import { lonLatToMeters } from "../projection/mercator";
+import { SimRenderer } from "./sim/SimRenderer";
 import { KeyboardController } from "./controls/KeyboardController";
 import type { TileProvider } from "../providers/registry";
 import { PoiLayer } from "./layers/PoiLayer";
-import { FeedManager } from "../feeds/FeedManager";
 import { FeedLayerBase } from "./layers/feeds/FeedLayerBase";
+import {
+  AISStreamFeed,
+  FeedManager,
+  OpenSkyFeed,
+  createMap3dWorld,
+  feedCommitRemovalsSystem,
+  feedExpireSystem,
+  feedRemoveSystem,
+  feedUpsertSystem,
+  ingestTileSystem,
+  lonLatToMeters,
+  releaseTileSystem,
+  simUpdateSystem,
+  type Map3dWorld,
+} from "@map3d/data-core";
 
 export interface EngineConfig {
   provider: TileProvider;
@@ -40,6 +52,24 @@ export interface EngineConfig {
   onProgress?: (loaded: number, inflight: number) => void;
 }
 
+const WORLD_ENTITY_CAP = 8192;
+const WORLD_POLYLINE_CAP = 4096;
+const WORLD_FEED_STALE_MS = 5 * 60 * 1000;
+const WORLD_SEED = 0xc0ffee;
+
+function readAisKey(): string | null {
+  try {
+    const ls = typeof localStorage !== "undefined"
+      ? localStorage.getItem("map3d.aisstream_key")
+      : null;
+    if (ls && ls.length > 0) return ls;
+  } catch {
+    // localStorage may be unavailable in some embeddings; ignore.
+  }
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  return env?.VITE_AISSTREAM_KEY ?? null;
+}
+
 export class Engine {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
@@ -48,7 +78,8 @@ export class Engine {
   readonly layers: Record<LayerName, Layer>;
   readonly tiles: TileManager;
   readonly sun: Sun;
-  readonly sim: Simulation;
+  readonly world: Map3dWorld;
+  readonly sim: SimRenderer;
   readonly keyboard: KeyboardController;
   readonly feeds: FeedManager;
   readonly nearLights: NearLightPool;
@@ -68,8 +99,6 @@ export class Engine {
     this.host = host;
     this.cfg = cfg;
 
-    // Renderer — WebGPU facade. Engine talks to it through stable methods so
-    // we can swap backends if we ever need to.
     if (!Renderer.webgpuAvailable()) {
       throw new Error(
         "WebGPU is not available in this browser. Try Chrome / Edge / Firefox / Safari with WebGPU enabled.",
@@ -77,13 +106,9 @@ export class Engine {
     }
     this.renderer = new Renderer({ host });
 
-    // Camera
     this.camera = new THREE.PerspectiveCamera(55, 1, 1, 30000);
     this.camera.position.set(0, 350, 500);
 
-    // OrbitControls
-    // PostProcessing (bloom etc.) is wired inside the Renderer facade — the
-    // engine just sets bloomStrength/bloomThreshold per frame.
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
@@ -91,15 +116,10 @@ export class Engine {
     this.controls.minDistance = 30;
     this.controls.maxPolarAngle = Math.PI * 0.495;
 
-    // Sun. Stage 1c will reinstate an atmospheric sky as a node material;
-    // for now the background is a single horizon-tinted colour the sun drives.
     this.sun = new Sun(this.scene);
     this.scene.background = new THREE.Color(this.sun.horizonColor);
     this.scene.fog = new THREE.FogExp2(this.sun.horizonColor.getHex(), 0.00009);
 
-    // Permanent dark stage plate so the sky-ground hemisphere never shows
-    // through when the user toggles surface layers off. Not a Layer — engine
-    // owns it.
     const stage = new THREE.Mesh(
       new THREE.PlaneGeometry(80000, 80000),
       new MeshStandardNodeMaterial({
@@ -114,7 +134,6 @@ export class Engine {
     stage.renderOrder = -10;
     this.scene.add(stage);
 
-    // Layers
     this.layers = createAllLayers(cfg.center.lat);
     for (const ln in this.layers) {
       this.scene.add(this.layers[ln as LayerName].root);
@@ -126,7 +145,6 @@ export class Engine {
       ]),
     ) as typeof this.layerSettings;
 
-    // Workers
     this.workers = new WorkerPool(
       () =>
         new Worker(new URL("../workers/tileFetch.worker.ts", import.meta.url), {
@@ -134,12 +152,18 @@ export class Engine {
         }),
     );
 
-    // Scene origin = the picked location, in Web Mercator metres.
     this.sceneOrigin = lonLatToMeters(cfg.center.lng, cfg.center.lat);
 
-    // TileManager — no bbox clamp, streaming follows camera.
+    // Single ECS world for sim agents + live feed entities.
+    this.world = createMap3dWorld({
+      entityCap: WORLD_ENTITY_CAP,
+      polylineCap: WORLD_POLYLINE_CAP,
+      feedStaleMs: WORLD_FEED_STALE_MS,
+      seed: WORLD_SEED,
+    });
+
     this.tiles = new TileManager({
-      pmtilesUrl: "<unused>", // legacy field — TileManager now uses worker init instead
+      pmtilesUrl: "<unused>",
       sceneOrigin: this.sceneOrigin,
       ringRadius: cfg.ringRadius ?? 4,
       bufferRings: 1,
@@ -159,47 +183,50 @@ export class Engine {
       onSelect: (layer, id) => {
         cfg.onSelect?.(layer, id, this.lastPointer.x, this.lastPointer.y);
       },
-      onTileLoaded: (tile) => this.sim.ingestTile(tile, this.sceneOrigin),
-      onTileEvicted: (tk) => this.sim.releaseTile(tk),
+      onTileLoaded: (tile) =>
+        ingestTileSystem(this.world, tile, { sceneOrigin: this.sceneOrigin }),
+      onTileEvicted: (tk) => releaseTileSystem(this.world, tk),
     });
 
-    // Simulation
-    this.sim = new Simulation(this.scene, this.sceneOrigin);
+    this.sim = new SimRenderer(this.scene, this.world);
 
-    // Real point-light pool that follows the camera and snaps onto the
-    // nearest streetlights every frame. Three's WebGPU happily lights with
-    // up to a few dozen dynamic lights via plain forward shading; clustered
-    // / G-buffer for thousands is the proper Stage 3.
     this.nearLights = new NearLightPool(this.scene, 20);
 
-    // Live feeds — aircraft (OpenSky) + vessels (AISStream).
-    this.feeds = new FeedManager(this.sceneOrigin);
+    // Wire feed layers to the world for rendering.
     const aircraftLayer = this.layers.aircraft as unknown as FeedLayerBase | undefined;
     const vesselLayer = this.layers.vessels as unknown as FeedLayerBase | undefined;
-    if (aircraftLayer) {
-      aircraftLayer.setSceneOrigin(this.sceneOrigin);
-      this.feeds.registerSink("aircraft", {
-        onUpdate: (e) => aircraftLayer.pushUpdate(e),
-        onRemove: (id) => aircraftLayer.remove(id),
-      });
-    }
-    if (vesselLayer) {
-      vesselLayer.setSceneOrigin(this.sceneOrigin);
-      this.feeds.registerSink("vessel", {
-        onUpdate: (e) => vesselLayer.pushUpdate(e),
-        onRemove: (id) => vesselLayer.remove(id),
-      });
-    }
+    if (aircraftLayer) aircraftLayer.setWorld(this.world);
+    if (vesselLayer) vesselLayer.setWorld(this.world);
+
+    // Live feeds — sources owned by data-core; sinks route into the ECS world.
+    this.feeds = new FeedManager(this.sceneOrigin, [
+      new OpenSkyFeed({ baseUrl: "/feeds/opensky" }),
+      new AISStreamFeed({ apiKey: readAisKey() }),
+    ]);
+    this.feeds.registerSink("aircraft", {
+      onUpdate: (e) =>
+        feedUpsertSystem(this.world, e, {
+          sceneOrigin: this.sceneOrigin,
+          altitudeScale: 1.0,
+        }),
+      onRemove: (id) => feedRemoveSystem(this.world, id),
+    });
+    this.feeds.registerSink("vessel", {
+      onUpdate: (e) =>
+        feedUpsertSystem(this.world, e, {
+          sceneOrigin: this.sceneOrigin,
+          altitudeScale: 1.0,
+        }),
+      onRemove: (id) => feedRemoveSystem(this.world, id),
+    });
     this.feeds.start();
 
-    // Selection picking.
     this.renderer.domElement.addEventListener("pointerdown", (e) => this.handlePick(e));
     this.renderer.domElement.addEventListener("pointermove", (e) => {
       this.lastPointer.x = e.clientX;
       this.lastPointer.y = e.clientY;
     });
 
-    // Keyboard controller composes with OrbitControls.
     this.keyboard = new KeyboardController(
       this.camera,
       this.controls,
@@ -212,7 +239,6 @@ export class Engine {
   }
 
   async start(): Promise<void> {
-    // WebGPU adapter+device handshake happens here.
     await this.renderer.init();
     this.renderer.attachScene(this.scene, this.camera);
     await this.tiles.init();
@@ -228,7 +254,7 @@ export class Engine {
       this.sun.update(this.hour);
       this.sunAltitude = this.sun.altitude;
       this.updateShadowCamera();
-      // Real point-light pool. Lamps fade in as the sun drops.
+
       const night = Math.max(0, -this.sunAltitude);
       this.nearLights.setNightIntensity(night);
       const streetLights = this.layers.streetlights;
@@ -239,18 +265,24 @@ export class Engine {
         this.scene.fog.color.copy(this.sun.horizonColor);
       }
       if (this.scene.background instanceof THREE.Color) {
-        // Blend the zenith and horizon — cheap stand-in for a real sky until
-        // Stage 1c. Lerp factor based on camera pitch isn't worth the work
-        // here; the single horizon-tinted background reads fine.
         this.scene.background.copy(this.sun.horizonColor);
       }
-      this.sim.update(dt);
-      this.sim.setNight(Math.max(0, -this.sunAltitude));
+
+      // Advance ECS world.
+      simUpdateSystem(this.world, dt);
+      feedExpireSystem(this.world, Date.now());
+
+      // Render out of the world.
+      this.sim.update();
+      this.sim.setNight(night);
       for (const ln in this.layers) {
         const layer = this.layers[ln as LayerName];
         layer.update?.(this.timeSec, this.sunAltitude, this.layerSettings[ln as LayerName].glow);
       }
-      // POI distance cull (engine-level because it needs camera coords).
+
+      // Commit feed removals after layers have read the world for this frame.
+      feedCommitRemovalsSystem(this.world);
+
       const pois = this.layers.pois;
       if (pois instanceof PoiLayer)
         pois.cullByCamera(this.camera.position.x, this.camera.position.z);
@@ -264,8 +296,6 @@ export class Engine {
   }
 
   private updateShadowCamera() {
-    // Shadow camera follows the orbit target (camera focus). Snap to texel grid
-    // to avoid shimmer on slow pans.
     const shadow = this.sun.dir.shadow.camera as THREE.OrthographicCamera;
     const target = this.controls.target;
     const size = shadow.right - shadow.left;
@@ -275,8 +305,6 @@ export class Engine {
     const tz = Math.round(target.z / texel) * texel;
     this.sun.dir.target.position.set(tx, 0, tz);
     this.sun.dir.target.updateMatrixWorld();
-    // Re-position the light relative to the target so the shadow camera
-    // doesn't lose the visible region as we fly.
     const offset = new THREE.Vector3()
       .copy(this.sun.dir.position)
       .sub(this.sun.dir.target.position);
