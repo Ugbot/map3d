@@ -1,257 +1,211 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MapContainer,
-  Rectangle,
+  Marker,
   TileLayer,
+  useMap,
   useMapEvents,
 } from "react-leaflet";
-import L, { LatLng, LatLngBounds } from "leaflet";
+import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { css } from "@emotion/react";
-import { CircleMinus, MousePointerClick } from "lucide-react";
+import { Crosshair, Search } from "lucide-react";
+import { useAreaStore, type PickedLocation } from "@/state/areaStore";
 
-const IconSize = css({
-  width: "14px",
-  height: "14px",
+// Fix Leaflet default-icon issue under Vite.
+const pinIcon = L.divIcon({
+  className: "map3d-pin",
+  html: `<div style="
+    width: 22px; height: 22px;
+    border-radius: 50% 50% 50% 0;
+    background: #ff7849;
+    border: 3px solid #fff;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.35);
+    transform: rotate(-45deg);
+    transform-origin: 50% 50%;
+  "></div>`,
+  iconSize: [22, 22],
+  iconAnchor: [11, 22],
 });
 
-function RectangleSelector({
-  isDrag = true,
-
-  bounds,
-  drawBounds,
-
-  onChange,
-  onDrawChange,
-}: {
-  isDrag: boolean;
-
-  bounds: LatLngBounds | null;
-  drawBounds: LatLngBounds | null;
-
-  onChange: (bounds: LatLngBounds) => void;
-  onDrawChange: (bounds: LatLngBounds) => void;
-}) {
-  const [firstPoint, setFirstPoint] = useState<LatLng | null>(null);
-
-  const lastLatlngRef = useRef<LatLng | null>(null);
-
-  const adjustLng = (latlng: LatLng): LatLng => {
-    const adjustedLng = ((((latlng.lng + 180) % 360) + 360) % 360) - 180;
-    return new L.LatLng(latlng.lat, adjustedLng);
-  };
-
-  const map = useMapEvents({
-    mousedown(e) {
-      if (!isDrag) {
-        setFirstPoint(e.latlng);
-      }
-    },
-    mousemove(e) {
-      if (firstPoint) {
-        lastLatlngRef.current = adjustLng(e.latlng);
-        onDrawChange(new L.LatLngBounds(firstPoint, e.latlng));
-        onChange(
-          new L.LatLngBounds(adjustLng(firstPoint), adjustLng(e.latlng))
-        );
-      }
-    },
-    mouseup(e) {
-      if (firstPoint) {
-        onDrawChange(new L.LatLngBounds(firstPoint, e.latlng));
-        onChange(
-          new L.LatLngBounds(adjustLng(firstPoint), adjustLng(e.latlng))
-        );
-        setFirstPoint(null);
-      }
+function ClickHandler({ onPick }: { onPick: (p: PickedLocation) => void }) {
+  useMapEvents({
+    click(e) {
+      onPick({ lat: e.latlng.lat, lng: e.latlng.lng });
     },
   });
+  return null;
+}
 
+function FlyTo({ target }: { target: PickedLocation | null }) {
+  const map = useMap();
   useEffect(() => {
-    const container = map.getContainer();
-    const handleTouchStart = (e: TouchEvent) => {
-      if (!isDrag && e.touches.length > 0) {
-        const touch = e.touches[0];
-        const latlng = map.mouseEventToLatLng(touch as any);
-        setFirstPoint(latlng);
-      }
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (firstPoint && e.touches.length > 0) {
-        const touch = e.touches[0];
-        const latlng = map.mouseEventToLatLng(touch as any);
-        lastLatlngRef.current = latlng;
-
-        onDrawChange(new L.LatLngBounds(firstPoint, latlng));
-        onChange(new L.LatLngBounds(adjustLng(firstPoint), adjustLng(latlng)));
-      }
-    };
-
-    const handleTouchEnd = (e: TouchEvent) => {
-      if (firstPoint) {
-        const latlng = lastLatlngRef.current || firstPoint;
-
-        onDrawChange(new L.LatLngBounds(firstPoint, latlng));
-        onChange(new L.LatLngBounds(adjustLng(firstPoint), adjustLng(latlng)));
-        setFirstPoint(null);
-      }
-    };
-
-    container.addEventListener("touchstart", handleTouchStart);
-    container.addEventListener("touchmove", handleTouchMove);
-    container.addEventListener("touchend", handleTouchEnd);
-
-    return () => {
-      container.removeEventListener("touchstart", handleTouchStart);
-      container.removeEventListener("touchmove", handleTouchMove);
-      container.removeEventListener("touchend", handleTouchEnd);
-    };
-  }, [map, isDrag, firstPoint, onChange]);
-
-  useEffect(() => {
-    if (map) {
-      isDrag ? map.dragging.enable() : map.dragging.disable();
-    }
-  }, [isDrag, map]);
-
-  return drawBounds ? (
-    <Rectangle bounds={drawBounds} pathOptions={{ color: "blue" }} />
-  ) : null;
+    if (!target) return;
+    map.flyTo([target.lat, target.lng], Math.max(13, map.getZoom()), { duration: 0.6 });
+  }, [target, map]);
+  return null;
 }
 
 export function MapComponent({
   onDone,
   onRemove,
 }: {
-  onDone: (e) => void;
+  onDone: (p: PickedLocation) => void;
   onRemove: () => void;
 }) {
-  const [isDrag, setIsDrag] = useState(true);
-  const [bounds, setBounds] = useState<LatLngBounds | null>(null);
-  const [drawBounds, setDrawBounds] = useState<LatLngBounds | null>(null);
+  const pick = useAreaStore((s) => s.pick);
+  const setPick = useAreaStore((s) => s.setPick);
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const searchAbort = useRef<AbortController | null>(null);
 
-  const handleClickSwitchDrag = () => {
-    setIsDrag(!isDrag);
+  // Emit the default pin so the wizard "next" button enables immediately.
+  useEffect(() => {
+    if (pick) onDone(pick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handlePick = (p: PickedLocation) => {
+    setPick(p);
+    onDone(p);
   };
 
-  const handleClickRemoveBox = () => {
-    onRemove();
-    setBounds(null);
-    setDrawBounds(null);
-    setIsDrag(true);
-  };
-
-  const handleChangeDone = (e) => {
-    setBounds(e);
-    onDone([e._northEast, e._southWest]);
-  };
-
-  const handleChangeDraw = (e) => {
-    setDrawBounds(e);
-    onDone([e._northEast, e._southWest]);
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    searchAbort.current?.abort();
+    const controller = new AbortController();
+    searchAbort.current = controller;
+    setSearching(true);
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`,
+        { signal: controller.signal, headers: { Accept: "application/json" } },
+      );
+      const arr = (await res.json()) as { lat: string; lon: string; display_name: string }[];
+      if (arr.length > 0) {
+        const r = arr[0];
+        handlePick({
+          lat: parseFloat(r.lat),
+          lng: parseFloat(r.lon),
+          label: r.display_name,
+        });
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") console.warn("geocode failed", err);
+    } finally {
+      setSearching(false);
+    }
   };
 
   return (
-    <div
-      css={css({
-        position: "relative",
-      })}
-    >
-      <div
-        css={css({
-          position: "absolute",
-          zIndex: 9999,
-          right: "1rem",
-          top: "1rem",
+    <div style={{ position: "relative" }}>
+      <form
+        onSubmit={handleSearch}
+        style={{
           display: "flex",
-          justifyContent: "flex-end",
-          gap: "0.5rem",
-        })}
+          gap: 8,
+          marginBottom: 10,
+          alignItems: "center",
+        }}
       >
+        <div style={{ position: "relative", flex: 1 }}>
+          <Search
+            size={14}
+            style={{ position: "absolute", left: 10, top: 11, color: "#94a3b8" }}
+          />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search a place (e.g. 'Yas Island', 'Tokyo')"
+            style={{
+              width: "100%",
+              padding: "8px 8px 8px 30px",
+              borderRadius: 8,
+              border: "1px solid rgba(0,0,0,0.1)",
+              fontSize: 13,
+              outline: "none",
+            }}
+          />
+        </div>
         <button
-          css={css({
-            display: bounds == null || isDrag == true ? "none" : "flex",
-            color: "#ffffff",
-
-            backgroundColor: "#ef4444",
-            backdropFilter: "blur(8px)",
+          type="submit"
+          disabled={searching}
+          style={{
+            padding: "8px 14px",
+            borderRadius: 8,
             border: "none",
-            padding: "0.5rem 1rem",
-            borderRadius: "8px",
-            outline: "#ef4444c2 solid 0.1rem",
-            cursor: "pointer",
-            transition: "0.2s",
-            alignItems: "center",
-            gap: "0.5rem",
-            ":hover": {
-              backgroundColor: "#ef4444",
-            },
-          })}
-          onClick={handleClickRemoveBox}
+            background: "var(--primary)",
+            color: "white",
+            cursor: searching ? "wait" : "pointer",
+            fontSize: 13,
+            fontWeight: 600,
+          }}
         >
-          <CircleMinus css={IconSize} /> Remove Box
+          {searching ? "…" : "Go"}
         </button>
-
-        <button
-          css={css({
-            color: isDrag ? "#ffffff" : "#000000",
-
-            backgroundColor: isDrag ? "#007bffe8" : "#ffffff96",
-            backdropFilter: "blur(8px)",
-            border: "none",
-            padding: "0.5rem 1rem",
-            borderRadius: "8px",
-            outline: isDrag
-              ? "#086ad4c2 solid 0.1rem"
-              : "rgba(240, 240, 244, 0.51) solid 0.1rem",
-            cursor: "pointer",
-            transition: "0.2s",
-            display: "flex",
-            alignItems: "center",
-            gap: "0.5rem",
-            ":hover": {
-              backgroundColor: isDrag ? "#085fbd" : "#ebeef0c2",
-            },
-          })}
-          onClick={handleClickSwitchDrag}
-        >
-          {isDrag ? <SelectBox /> : "Back to Drag"}
-        </button>
-      </div>
+      </form>
 
       <MapContainer
-        center={[40.8, -73.95]}
+        center={pick ? [pick.lat, pick.lng] : [24.4539, 54.3773]}
         zoom={13}
         style={{
-          height: "400px",
+          height: 360,
           width: "100%",
-          borderRadius: "12px",
+          borderRadius: 12,
           overflow: "hidden",
-          border: "1px solid rgba(0,0,0,0.1)"
+          border: "1px solid rgba(0,0,0,0.1)",
         }}
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors'
+          attribution='&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-        <RectangleSelector
-          bounds={bounds}
-          drawBounds={drawBounds}
-          isDrag={isDrag}
-          onChange={handleChangeDone}
-          onDrawChange={handleChangeDraw}
-        />
+        <ClickHandler onPick={handlePick} />
+        <FlyTo target={pick} />
+        {pick && <Marker position={[pick.lat, pick.lng]} icon={pinIcon} />}
       </MapContainer>
-    </div>
-  );
-}
 
-function SelectBox() {
-  return (
-    <>
-      <MousePointerClick css={IconSize} />
-      <span>Select Box</span>
-    </>
+      <div
+        style={{
+          marginTop: 10,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          fontSize: 12,
+          opacity: 0.75,
+        }}
+      >
+        <Crosshair size={14} />
+        {pick ? (
+          <span>
+            {pick.label ?? "Pinned"} &nbsp;
+            <code style={{ fontSize: 11, opacity: 0.7 }}>
+              {pick.lat.toFixed(5)}, {pick.lng.toFixed(5)}
+            </code>
+          </span>
+        ) : (
+          <span>Click anywhere on the map to drop a pin.</span>
+        )}
+        {pick && (
+          <button
+            onClick={() => {
+              setPick(null);
+              onRemove();
+            }}
+            style={{
+              marginLeft: "auto",
+              background: "transparent",
+              border: "1px solid rgba(0,0,0,0.1)",
+              borderRadius: 6,
+              padding: "3px 8px",
+              fontSize: 11,
+              cursor: "pointer",
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
   );
 }

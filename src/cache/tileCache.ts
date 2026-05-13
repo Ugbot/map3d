@@ -42,6 +42,15 @@ function k(z: number, x: number, y: number, version: number) {
   return `${version}/${z}/${x}/${y}`;
 }
 
+export function makeVersion(providerId: string, schema: string, schemaRev = 2): number {
+  // Hash provider+schema into a stable u32 so swapping providers keys to a
+  // different cache namespace. schemaRev bumps when our parser changes.
+  let h = 5381;
+  const s = `${providerId}|${schema}|${schemaRev}`;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+
 let dbPromise: Promise<IDBPDatabase<Schema>> | null = null;
 function db() {
   if (!dbPromise) {

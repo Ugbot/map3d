@@ -71,6 +71,29 @@ export class WorkerPool {
   get inflight() {
     return this.pending.size;
   }
+  get size() {
+    return this.workers.length;
+  }
+
+  /** Send the same message to every worker; resolves when all reply. */
+  broadcast<R, P = unknown>(type: string, payload: P): Promise<R[]> {
+    const promises: Promise<R>[] = [];
+    for (let i = 0; i < this.workers.length; i++) {
+      const id = this.nextId++;
+      const w = this.workers[i];
+      promises.push(
+        new Promise<R>((resolve, reject) => {
+          this.pending.set(id, {
+            resolve: resolve as (v: unknown) => void,
+            reject,
+            type,
+          });
+          w.postMessage({ id, type, payload });
+        }),
+      );
+    }
+    return Promise.all(promises);
+  }
 
   terminate() {
     for (const w of this.workers) w.terminate();

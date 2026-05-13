@@ -1,50 +1,30 @@
 import { css, Global } from "@emotion/react";
 import { Space } from "../three/Space";
 import { useState } from "react";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Globe,
-  Map as MapIcon,
-  Database,
-  Layers,
-  Github,
-} from "lucide-react";
-import { useAreaStore } from "@/state/areaStore";
+import { ChevronRight, Globe, MapPin, Github, X } from "lucide-react";
+import { useAreaStore, type PickedLocation } from "@/state/areaStore";
 import { MapComponent } from "@/components/map/SelectMap";
-import { BuildingHeights } from "@/components/map/Processing";
 import { useCityStore } from "@/state/cityStore";
 import { LayerPanel } from "@/ui/LayerPanel";
 import { TimeOfDay } from "@/ui/TimeOfDay";
-
-interface LatLng {
-  lat: number;
-  lng: number;
-}
+import { ProviderPicker } from "@/ui/ProviderPicker";
 
 const App = () => {
-  const [step, setStep] = useState(0);
-  const isReady = useCityStore((state) => state.isReady);
-  const [areaData, setAreaData] = useState<LatLng[]>([]);
-  const setCenter = useAreaStore((state) => state.setCenter);
+  const isReady = useCityStore((s) => s.isReady);
+  const pick = useAreaStore((s) => s.pick);
+  const setPick = useAreaStore((s) => s.setPick);
+  const setReady = useCityStore((s) => s.setReady);
+  const [overlayOpen, setOverlayOpen] = useState(false);
 
-  const steps = [
-    { title: "Select Area", icon: <MapIcon size={18} />, description: "Select a location on the map" },
-    { title: "Process Data", icon: <Database size={18} />, description: "Lock area for streaming" },
-    { title: "View 3D", icon: <Layers size={18} />, description: "Explore the streaming digital twin" },
-  ];
-
-  const handleDone = (data: LatLng[]) => {
-    setAreaData(data);
-    setCenter(data);
+  const handleDone = (p: PickedLocation) => {
+    setPick(p);
   };
-
   const handleRemove = () => {
-    setAreaData([]);
+    setPick(null);
   };
 
-  const prevStep = () => {
-    if (step > 0) setStep(step - 1);
+  const enter3D = () => {
+    if (pick) setReady(true);
   };
 
   return (
@@ -65,24 +45,35 @@ const App = () => {
             align-items: center;
             gap: 8px;
             box-shadow: 0 4px 12px rgba(0, 122, 255, 0.2);
+            cursor: pointer;
           }
           .btn-secondary {
-            background: white;
-            color: #1e293b;
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            padding: 12px 24px;
+            background: rgba(20, 22, 34, 0.92);
+            color: #e2e8f0;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            padding: 10px 16px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            backdrop-filter: blur(12px);
+            font-size: 13px;
+          }
+          .btn-secondary:hover {
+            background: rgba(30, 34, 50, 0.95);
           }
         `}
       />
 
-      {/* Wizard sidebar (steps 0/1) */}
-      {step < 2 && (
+      {/* Pick mode — picker fills the viewport. */}
+      {!isReady && (
         <div
           className="panel premium-card"
           style={{
-            top: "32px",
-            left: "32px",
-            width: "400px",
+            top: 32,
+            left: 32,
+            width: 480,
             maxHeight: "calc(100vh - 64px)",
             overflowY: "auto",
           }}
@@ -92,17 +83,17 @@ const App = () => {
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              marginBottom: "24px",
+              marginBottom: 20,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <div style={{ background: "var(--primary)", padding: "10px", borderRadius: "12px" }}>
-                <Globe size={24} color="white" />
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ background: "var(--primary)", padding: 10, borderRadius: 12 }}>
+                <Globe size={22} color="white" />
               </div>
               <div>
-                <h1 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>Map3D Streaming</h1>
-                <p style={{ margin: 0, fontSize: "12px", opacity: 0.6 }}>
-                  Layered digital-twin viewer
+                <h1 style={{ margin: 0, fontSize: 19, fontWeight: 700 }}>Map3D</h1>
+                <p style={{ margin: 0, fontSize: 12, opacity: 0.6 }}>
+                  Streaming digital-twin viewer
                 </p>
               </div>
             </div>
@@ -114,77 +105,134 @@ const App = () => {
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                width: "40px",
-                height: "40px",
+                width: 36,
+                height: 36,
                 borderRadius: "50%",
                 background: "#f8fafc",
                 border: "1px solid rgba(0,0,0,0.05)",
                 color: "#1e293b",
               }}
             >
-              <Github size={20} />
+              <Github size={18} />
             </a>
           </div>
 
-          <div className="step-indicator">
-            {steps.map((s, i) => (
-              <div key={i} className={`step-dot ${i === step ? "active" : ""}`} />
-            ))}
-          </div>
-
-          <h2 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "8px" }}>
-            {steps[step].title}
+          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+            <MapPin size={16} /> Pick a starting location
           </h2>
-          <p style={{ fontSize: "14px", opacity: 0.7, marginBottom: "24px" }}>
-            {steps[step].description}
+          <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 16 }}>
+            Click anywhere on the map or search for a place. The 3D scene will stream around it.
           </p>
 
-          <div style={{ marginBottom: "32px" }}>
-            {step === 0 && <MapComponent onRemove={handleRemove} onDone={handleDone} />}
-            {step === 1 && <BuildingHeights area={areaData} />}
+          <MapComponent onRemove={handleRemove} onDone={handleDone} />
+
+          <div style={{ marginTop: 16 }}>
+            <ProviderPicker />
           </div>
 
-          <div style={{ display: "flex", gap: "12px" }}>
-            {step > 0 && (
-              <button className="btn-secondary" onClick={prevStep} style={{ flex: 1 }}>
-                <ChevronLeft size={18} /> Back
-              </button>
-            )}
-            <button
-              className="btn-premium"
-              onClick={() => setStep(step + 1)}
-              disabled={(step === 0 && areaData.length === 0) || (step === 1 && !isReady)}
-              style={{
-                flex: 2,
-                opacity: (step === 0 && areaData.length === 0) || (step === 1 && !isReady) ? 0.5 : 1,
-              }}
-            >
-              {step === 1 ? "Enter 3D" : "Continue"} <ChevronRight size={18} />
-            </button>
-          </div>
+          <button
+            className="btn-premium"
+            onClick={enter3D}
+            disabled={!pick}
+            style={{
+              width: "100%",
+              marginTop: 16,
+              padding: "14px 24px",
+              borderRadius: 10,
+              justifyContent: "center",
+              fontWeight: 700,
+              fontSize: 14,
+              opacity: pick ? 1 : 0.5,
+              cursor: pick ? "pointer" : "not-allowed",
+            }}
+          >
+            Enter 3D <ChevronRight size={18} />
+          </button>
         </div>
       )}
 
-      {/* 3D View overlay */}
-      {step === 2 && (
+      {/* Viewing mode — engine renders, overlays around it. */}
+      {isReady && (
         <>
-          <div className="panel" style={{ top: "32px", left: "32px" }}>
+          <div className="panel" style={{ top: 32, left: 32 }}>
             <button
-              className="btn-secondary premium-card"
-              onClick={() => setStep(1)}
-              style={{ padding: "12px 20px", display: "flex", alignItems: "center", gap: "8px" }}
+              className="btn-secondary"
+              onClick={() => setOverlayOpen(true)}
+              title="Pick a new location"
             >
-              <ChevronLeft size={18} /> Edit Map
+              <MapPin size={14} /> New location
             </button>
           </div>
 
-          <div className="panel" style={{ top: "32px", right: "32px" }}>
+          <div className="panel" style={{ top: 32, right: 32 }}>
             <LayerPanel />
           </div>
 
-          <div className="panel" style={{ bottom: "32px", left: "50%", transform: "translateX(-50%)" }}>
+          <div
+            className="panel"
+            style={{ bottom: 32, left: "50%", transform: "translateX(-50%)" }}
+          >
             <TimeOfDay />
           </div>
+
+          {overlayOpen && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background: "rgba(11, 16, 32, 0.75)",
+                backdropFilter: "blur(8px)",
+                zIndex: 200,
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "center",
+                paddingTop: 80,
+              }}
+            >
+              <div
+                className="premium-card"
+                style={{
+                  width: 520,
+                  padding: 20,
+                  position: "relative",
+                  pointerEvents: "all",
+                }}
+              >
+                <button
+                  onClick={() => setOverlayOpen(false)}
+                  style={{
+                    position: "absolute",
+                    top: 12,
+                    right: 12,
+                    background: "transparent",
+                    border: "none",
+                    color: "#64748b",
+                    cursor: "pointer",
+                  }}
+                  aria-label="close"
+                >
+                  <X size={18} />
+                </button>
+                <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
+                  Pick a new location
+                </h2>
+                <MapComponent onRemove={handleRemove} onDone={handleDone} />
+                <button
+                  className="btn-premium"
+                  onClick={() => setOverlayOpen(false)}
+                  style={{
+                    width: "100%",
+                    marginTop: 14,
+                    padding: "12px 18px",
+                    borderRadius: 10,
+                    justifyContent: "center",
+                  }}
+                >
+                  Go <ChevronRight size={18} />
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
 

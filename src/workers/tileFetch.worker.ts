@@ -1,39 +1,26 @@
-// Tile fetch + parse worker.
-//
-// Responsibilities:
-//   1. Range-read tiles from a PMTiles archive (composable: any TileSource
-//      satisfying `getTile(z,x,y)` works — see TileSource below).
-//   2. Decode MVT to per-layer SoA buffers in Web Mercator metres.
-//   3. Triangulate polygons via earcut so re-loading from cache requires zero
-//      CPU on the main thread.
-//   4. Post the ParsedTile back as transferable typed arrays.
-
 /// <reference lib="webworker" />
 
 import { PMTiles } from "pmtiles";
 import { VectorTile } from "@mapbox/vector-tile";
 import Pbf from "pbf";
 import earcut from "earcut";
+import { gunzipSync } from "fflate";
 import {
   tileMetersBox,
   tileLocalToMeters,
   type MetersBox,
 } from "../projection/mercator";
-import type { LayerGeometry, LayerName, ParsedTile } from "../cache/types";
-import {
-  classifyRoad,
-  classifyRail,
-  classifyPath,
-  classifyLanduse,
-  BuildingClass,
-  PoiClass,
-} from "../cache/classes";
+import type { BakedLineMesh, LayerGeometry, LayerName, ParsedTile } from "../cache/types";
 import type { WorkerRequest, WorkerResponse } from "./pool";
+import type { Schema } from "./schemas/types";
+import { protomapsV4 } from "./schemas/protomapsV4";
+import { openmaptiles } from "./schemas/openmaptiles";
+import { bakeRibbonMesh, type RibbonConfig } from "./ribbonGen";
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
 // ────────────────────────────────────────────────────────────────────────────
-// Tile source abstraction. A backend service can implement the same interface.
+// Tile sources
 // ────────────────────────────────────────────────────────────────────────────
 interface TileSource {
   getTile(z: number, x: number, y: number): Promise<ArrayBuffer | undefined>;
@@ -44,44 +31,54 @@ class PMTilesSource implements TileSource {
   constructor(url: string) {
     this.p = new PMTiles(url);
   }
-  async getTile(z: number, x: number, y: number): Promise<ArrayBuffer | undefined> {
+  async getTile(z: number, x: number, y: number) {
     const r = await this.p.getZxy(z, x, y);
     return r?.data;
   }
 }
 
+class MVTSource implements TileSource {
+  constructor(private readonly urlTemplate: string) {}
+  async getTile(z: number, x: number, y: number) {
+    const url = this.urlTemplate
+      .replace("{z}", String(z))
+      .replace("{x}", String(x))
+      .replace("{y}", String(y));
+    const res = await fetch(url);
+    if (!res.ok) {
+      if (res.status === 404) return undefined;
+      throw new Error(`tile fetch ${res.status} for ${z}/${x}/${y}`);
+    }
+    return res.arrayBuffer();
+  }
+}
+
 let source: TileSource | null = null;
-const VERSION = 1;
-const TILE_BUDGET_LAYERS: LayerName[] = [
-  "buildings",
+let schema: Schema = openmaptiles;
+let sceneOrigin: { x: number; y: number } | null = null;
+let ribbonConfigs: Partial<Record<LayerName, RibbonConfig>> = {};
+
+const LAYER_NAMES: LayerName[] = [
+  "earth",
+  "landcover",
+  "landuse",
+  "water",
+  "waterway",
+  "paths",
   "roads",
   "rail",
-  "water",
-  "landuse",
-  "paths",
+  "buildings",
   "pois",
 ];
 
-// Names Protomaps basemaps v3/v4 uses. We accept the union and pick first hit.
-const PROTOMAPS_LAYER_ALIASES: Record<LayerName, string[]> = {
-  buildings: ["buildings"],
-  roads: ["roads"],
-  rail: ["roads"], // rail is in the roads layer with kind=rail* in Protomaps
-  water: ["water"],
-  landuse: ["landuse", "natural"],
-  paths: ["roads"], // paths/footways also in roads with kind=path
-  pois: ["pois", "places"],
-};
-
 // ────────────────────────────────────────────────────────────────────────────
-// MVT parsing
+// MVT parsing — SoA pack with multi-part line split.
 // ────────────────────────────────────────────────────────────────────────────
 
 interface Ring {
-  flat: number[]; // x0,y0,x1,y1,... in tile-local coords
+  flat: number[];
 }
 
-// Signed area; positive = CCW under MVT's y-down → outer ring, negative = hole.
 function ringArea(flat: number[]): number {
   let a = 0;
   for (let i = 0, j = flat.length - 2; i < flat.length; j = i, i += 2) {
@@ -132,100 +129,7 @@ function pushAttr(
   if (kept > 0) attrs[`${layer}:${featureId}`] = filtered;
 }
 
-function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedTile {
-  const box = tileMetersBox(z, x, y);
-  const vt = new VectorTile(new Pbf(bytes));
-  const out: ParsedTile = {
-    z,
-    x,
-    y,
-    version: VERSION,
-    layers: {},
-    attributes: {},
-    byteSize: 0,
-  };
-
-  for (const targetLayer of TILE_BUDGET_LAYERS) {
-    const accum = newAccum();
-    let nextFeatureId = 0;
-    let geomKind: "polygon" | "line" | "point" | null = null;
-
-    for (const alias of PROTOMAPS_LAYER_ALIASES[targetLayer]) {
-      const lyr = vt.layers[alias];
-      if (!lyr) continue;
-      const extent = lyr.extent ?? 4096;
-
-      for (let i = 0; i < lyr.length; i++) {
-        const f = lyr.feature(i);
-        const props = f.properties as Record<string, unknown>;
-        const cls = classifyForLayer(targetLayer, alias, props);
-        if (cls === null) continue;
-        const startBefore =
-          f.type === 3 ? accum.indices.length : accum.positions.length / 2;
-        const rings = f.loadGeometry();
-
-        if (f.type === 3) {
-          geomKind = "polygon";
-          // rings is a flat list of rings; ring with positive signed-area
-          // (under MVT's y-down) starts a new polygon, negative rings are holes.
-          let i2 = 0;
-          while (i2 < rings.length) {
-            const outer = rings[i2++];
-            const polyRings: { x: number; y: number }[][] = [outer];
-            while (i2 < rings.length) {
-              const r = rings[i2];
-              const flat: number[] = [];
-              for (const p of r) flat.push(p.x, p.y);
-              if (ringArea(flat) >= 0) break;
-              polyRings.push(r);
-              i2++;
-            }
-            triangulateAndAppend(accum, polyRings, box, extent);
-          }
-        } else if (f.type === 2) {
-          geomKind = "line";
-          for (const line of rings)
-            for (const p of line) {
-              const m = tileLocalToMeters(box, extent, p.x, p.y);
-              accum.positions.push(m.x, m.y);
-            }
-        } else if (f.type === 1) {
-          geomKind = "point";
-          for (const pts of rings)
-            for (const p of pts) {
-              const m = tileLocalToMeters(box, extent, p.x, p.y);
-              accum.positions.push(m.x, m.y);
-            }
-        } else {
-          continue;
-        }
-
-        const endAfter =
-          f.type === 3 ? accum.indices.length : accum.positions.length / 2;
-        if (endAfter === startBefore) continue; // degenerate
-
-        const fid = nextFeatureId++;
-        accum.featureIds.push(fid);
-        accum.featureClass.push(cls);
-        accum.featureHeight.push(numericProp(props, "height", 0));
-        accum.featureMinHeight.push(numericProp(props, "min_height", 0));
-        pushAttr(accum.attributes, targetLayer, fid, props);
-        accum.featureStart.push(endAfter); // sentinel for *this* feature's end / next's start
-      }
-    }
-
-    if (geomKind && accum.featureIds.length > 0) {
-      // featureStart = [0, end0, end1, ..., endN] of length featureCount+1.
-      out.layers[targetLayer] = freezeGeometryAlreadyClosed(geomKind, accum);
-      for (const k in accum.attributes) out.attributes[k] = accum.attributes[k];
-    }
-  }
-
-  out.byteSize = approximateByteSize(out);
-  return out;
-}
-
-function freezeGeometryAlreadyClosed(
+function freezeGeometry(
   kind: "polygon" | "line" | "point",
   a: FeatureAccum,
 ): LayerGeometry {
@@ -241,112 +145,12 @@ function freezeGeometryAlreadyClosed(
   };
 }
 
-function classifyForLayer(
-  target: LayerName,
-  sourceLayer: string,
-  props: Record<string, unknown>,
-): number | null {
-  const kind = stringProp(props, "kind");
-  switch (target) {
-    case "buildings":
-      if (sourceLayer !== "buildings") return null;
-      return mapBuildingClass(kind);
-    case "water":
-      if (sourceLayer !== "water") return null;
-      return 1;
-    case "landuse":
-      if (sourceLayer !== "landuse" && sourceLayer !== "natural") return null;
-      return classifyLanduse(kind);
-    case "roads": {
-      if (sourceLayer !== "roads") return null;
-      const c = classifyRoad(kind);
-      if (c === 0 && !isCarRoadKind(kind)) return null;
-      return c;
-    }
-    case "rail": {
-      if (sourceLayer !== "roads") return null;
-      if (!isRailKind(kind)) return null;
-      return classifyRail(kind);
-    }
-    case "paths": {
-      if (sourceLayer !== "roads") return null;
-      if (!isPathKind(kind)) return null;
-      return classifyPath(kind);
-    }
-    case "pois": {
-      if (sourceLayer !== "pois" && sourceLayer !== "places") return null;
-      return mapPoiClass(kind);
-    }
-  }
-  return null;
-}
-
-function isCarRoadKind(k: string | undefined) {
-  if (!k) return false;
-  return [
-    "motorway",
-    "trunk",
-    "primary",
-    "secondary",
-    "tertiary",
-    "residential",
-    "service",
-    "unclassified",
-    "living_street",
-  ].includes(k);
-}
-function isRailKind(k: string | undefined) {
-  if (!k) return false;
-  return ["rail", "subway", "light_rail", "tram", "monorail"].includes(k);
-}
-function isPathKind(k: string | undefined) {
-  if (!k) return false;
-  return ["footway", "path", "cycleway", "pedestrian", "steps"].includes(k);
-}
-
-function mapBuildingClass(kind: string | undefined): number {
-  if (!kind) return BuildingClass.unknown;
-  const k = kind.toLowerCase();
-  if (k.includes("residential") || k === "apartments" || k === "house") return BuildingClass.residential;
-  if (k.includes("commercial") || k === "office" || k === "retail") return BuildingClass.commercial;
-  if (k.includes("industrial") || k === "warehouse") return BuildingClass.industrial;
-  if (k === "church" || k === "mosque" || k === "temple" || k === "synagogue") return BuildingClass.religious;
-  if (k === "civic" || k === "government" || k === "public") return BuildingClass.civic;
-  if (k === "train_station" || k === "station") return BuildingClass.transit;
-  return BuildingClass.unknown;
-}
-
-function mapPoiClass(kind: string | undefined): number {
-  if (!kind) return PoiClass.unknown;
-  const k = kind.toLowerCase();
-  if (k === "bus_stop") return PoiClass.bus_stop;
-  if (k === "station" || k === "railway_station") return PoiClass.station;
-  if (k === "subway_entrance") return PoiClass.subway_entrance;
-  if (k === "tram_stop") return PoiClass.tram_stop;
-  return PoiClass.unknown;
-}
-
-function stringProp(p: Record<string, unknown>, k: string): string | undefined {
-  const v = p[k];
-  return typeof v === "string" ? v : undefined;
-}
-function numericProp(p: Record<string, unknown>, k: string, dflt: number): number {
-  const v = p[k];
-  if (typeof v === "number") return v;
-  if (typeof v === "string") {
-    const f = parseFloat(v);
-    return Number.isFinite(f) ? f : dflt;
-  }
-  return dflt;
-}
-
 function triangulateAndAppend(
   accum: FeatureAccum,
   rings: { x: number; y: number }[][],
   box: MetersBox,
   extent: number,
 ) {
-  // Flatten rings to one positions array + holes index array for earcut.
   const flat: number[] = [];
   const holes: number[] = [];
   const baseVertex = accum.positions.length / 2;
@@ -357,11 +161,170 @@ function triangulateAndAppend(
       flat.push(m.x, m.y);
     }
   }
-  if (flat.length < 6) return; // not enough for a triangle
+  if (flat.length < 6) return;
   const tri = earcut(flat, holes);
   if (tri.length === 0) return;
   for (let i = 0; i < flat.length; i++) accum.positions.push(flat[i]);
   for (let i = 0; i < tri.length; i++) accum.indices.push(baseVertex + tri[i]);
+}
+
+function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedTile {
+  const box = tileMetersBox(z, x, y);
+  // OpenFreeMap serves gzip; the browser usually decompresses, but bare bytes
+  // (range reads from PMTiles or proxies that pass-through gzip) can land here
+  // still compressed. Sniff and inflate if needed.
+  let buf: ArrayBuffer = bytes;
+  const view = new Uint8Array(bytes);
+  if (view.length > 2 && view[0] === 0x1f && view[1] === 0x8b) {
+    const out = gunzipSync(view);
+    buf = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
+  }
+  const vt = new VectorTile(new Pbf(buf));
+  const out: ParsedTile = {
+    z,
+    x,
+    y,
+    version: 1,
+    layers: {},
+    attributes: {},
+    byteSize: 0,
+  };
+
+  for (const targetLayer of LAYER_NAMES) {
+    const expectedType = schema.expectedType[targetLayer];
+    const aliases = schema.aliases[targetLayer];
+    if (!aliases || aliases.length === 0) continue;
+    const accum = newAccum();
+    let nextFeatureId = 0;
+
+    for (const alias of aliases) {
+      const lyr = vt.layers[alias];
+      if (!lyr) continue;
+      const extent = lyr.extent ?? 4096;
+
+      for (let i = 0; i < lyr.length; i++) {
+        const f = lyr.feature(i);
+        if (f.type !== expectedType) continue;
+        const props = f.properties as Record<string, unknown>;
+        const cls = schema.classify(targetLayer, alias, props);
+        if (cls === null) continue;
+        const rings = f.loadGeometry();
+
+        if (f.type === 3) {
+          // POLYGONS — earcut each closed sub-polygon. One MVT feature can have
+          // multiple polygons (outer ring with negative-area holes follows it).
+          const startBefore = accum.indices.length;
+          let i2 = 0;
+          while (i2 < rings.length) {
+            const outer = rings[i2++];
+            const polyRings: { x: number; y: number }[][] = [outer];
+            while (i2 < rings.length) {
+              const r = rings[i2];
+              const flat: number[] = [];
+              for (const p of r) flat.push(p.x, p.y);
+              if (ringArea(flat) >= 0) break;
+              polyRings.push(r);
+              i2++;
+            }
+            triangulateAndAppend(accum, polyRings, box, extent);
+          }
+          if (accum.indices.length === startBefore) continue;
+          const fid = nextFeatureId++;
+          accum.featureIds.push(fid);
+          accum.featureClass.push(cls);
+          accum.featureHeight.push(schema.heightFor(props));
+          accum.featureMinHeight.push(schema.minHeightFor(props));
+          pushAttr(accum.attributes, targetLayer, fid, props);
+          accum.featureStart.push(accum.indices.length);
+        } else if (f.type === 2) {
+          // LINES — emit each MVT geometry "part" (one polyline) as its own
+          // feature, so disconnected segments aren't dragged into one ribbon.
+          for (const line of rings) {
+            if (line.length < 2) continue;
+            const before = accum.positions.length / 2;
+            for (const p of line) {
+              const m = tileLocalToMeters(box, extent, p.x, p.y);
+              accum.positions.push(m.x, m.y);
+            }
+            const fid = nextFeatureId++;
+            accum.featureIds.push(fid);
+            accum.featureClass.push(cls);
+            accum.featureHeight.push(0);
+            accum.featureMinHeight.push(0);
+            pushAttr(accum.attributes, targetLayer, fid, props);
+            accum.featureStart.push(accum.positions.length / 2);
+            void before;
+          }
+        } else if (f.type === 1) {
+          // POINTS — one MVT feature can have multiple points; emit each as
+          // its own feature so InstancedMesh slots stay 1:1 with featureIds.
+          for (const pts of rings) {
+            for (const p of pts) {
+              const m = tileLocalToMeters(box, extent, p.x, p.y);
+              accum.positions.push(m.x, m.y);
+              const fid = nextFeatureId++;
+              accum.featureIds.push(fid);
+              accum.featureClass.push(cls);
+              accum.featureHeight.push(0);
+              accum.featureMinHeight.push(0);
+              pushAttr(accum.attributes, targetLayer, fid, props);
+              accum.featureStart.push(accum.positions.length / 2);
+            }
+          }
+        }
+      }
+    }
+
+    if (accum.featureIds.length > 0) {
+      const geomKind = expectedType === 3 ? "polygon" : expectedType === 2 ? "line" : "point";
+      out.layers[targetLayer] = freezeGeometry(geomKind, accum);
+      for (const k in accum.attributes) out.attributes[k] = accum.attributes[k];
+    }
+  }
+
+  // Synthesize an earth quad if no earth features came through (OMT has no
+  // earth layer; we need a base plate so empty tiles aren't a void).
+  if (!out.layers.earth) {
+    out.layers.earth = synthEarthQuad(box);
+  }
+
+  // Bake the 3D ribbon meshes here (off the main thread) for any line layer
+  // with a registered config. The main thread just uploads the buffers.
+  if (sceneOrigin) {
+    const baked: Partial<Record<LayerName, BakedLineMesh>> = {};
+    for (const ln in ribbonConfigs) {
+      const cfg = ribbonConfigs[ln as LayerName];
+      const g = out.layers[ln as LayerName];
+      if (!cfg || !g || g.kind !== "line") continue;
+      const m = bakeRibbonMesh(g, sceneOrigin, cfg);
+      if (m) baked[ln as LayerName] = m;
+    }
+    if (Object.keys(baked).length > 0) out.bakedLines = baked;
+  }
+
+  out.byteSize = approximateByteSize(out);
+  return out;
+}
+
+function synthEarthQuad(box: MetersBox): LayerGeometry {
+  // Four corners CCW (under our north→-Z scene), one triangle pair.
+  const positions = new Float32Array([
+    box.minX, box.minY,
+    box.maxX, box.minY,
+    box.maxX, box.maxY,
+    box.minX, box.maxY,
+  ]);
+  const indices = new Uint32Array([0, 1, 2, 0, 2, 3]);
+  return {
+    kind: "polygon",
+    positions,
+    indices,
+    featureStart: new Uint32Array([0, 6]),
+    featureIds: new Uint32Array([0]),
+    featureClass: new Uint8Array([1]),
+    featureHeight: new Float32Array([0]),
+    featureMinHeight: new Float32Array([0]),
+  };
 }
 
 function approximateByteSize(t: ParsedTile): number {
@@ -376,14 +339,10 @@ function approximateByteSize(t: ParsedTile): number {
     n += g.featureHeight.byteLength;
     n += g.featureMinHeight.byteLength;
   }
-  // Rough estimate for attributes.
   n += JSON.stringify(t.attributes).length * 2;
   return n;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Transfer list assembly (all SoA buffers).
-// ────────────────────────────────────────────────────────────────────────────
 function transferablesOf(t: ParsedTile): Transferable[] {
   const out: Transferable[] = [];
   for (const k in t.layers) {
@@ -396,21 +355,45 @@ function transferablesOf(t: ParsedTile): Transferable[] {
     out.push(g.featureHeight.buffer);
     out.push(g.featureMinHeight.buffer);
   }
+  if (t.bakedLines) {
+    for (const k in t.bakedLines) {
+      const m = t.bakedLines[k as LayerName];
+      if (!m) continue;
+      out.push(m.positions.buffer);
+      out.push(m.indices.buffer);
+      if (m.uvs) out.push(m.uvs.buffer);
+      out.push(m.featureRanges.buffer);
+      out.push(m.featureIds.buffer);
+    }
+  }
   return out;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// RPC dispatcher
+// RPC
 // ────────────────────────────────────────────────────────────────────────────
+
+interface InitPayload {
+  source: { kind: "pmtiles"; url: string } | { kind: "mvt"; urlTemplate: string };
+  schema: "openmaptiles" | "protomaps-v4";
+  cacheVersion: number;
+  sceneOrigin?: { x: number; y: number };
+  ribbonConfigs?: Partial<Record<LayerName, RibbonConfig>>;
+}
+
 ctx.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const { id, type, payload } = e.data;
   try {
     if (type === "init") {
-      const { url } = payload as { url: string };
-      source = new PMTilesSource(url);
+      const p = payload as InitPayload;
+      source =
+        p.source.kind === "pmtiles" ? new PMTilesSource(p.source.url) : new MVTSource(p.source.urlTemplate);
+      schema = p.schema === "openmaptiles" ? openmaptiles : protomapsV4;
+      if (p.sceneOrigin) sceneOrigin = p.sceneOrigin;
+      if (p.ribbonConfigs) ribbonConfigs = p.ribbonConfigs;
       reply(id, true, { ok: true });
     } else if (type === "fetchTile") {
-      if (!source) throw new Error("worker not initialised — call init first");
+      if (!source) throw new Error("worker not initialised");
       const { z, x, y } = payload as { z: number; x: number; y: number };
       const bytes = await source.getTile(z, x, y);
       if (!bytes) {
@@ -420,7 +403,7 @@ ctx.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       const parsed = parseTile(z, x, y, bytes);
       reply(id, true, { tile: parsed, missing: false }, transferablesOf(parsed));
     } else {
-      throw new Error(`unknown message type: ${type}`);
+      throw new Error(`unknown message: ${type}`);
     }
   } catch (err) {
     reply(id, false, undefined, [], err instanceof Error ? err.message : String(err));
@@ -437,4 +420,3 @@ function reply(
   const msg: WorkerResponse = { id, ok, result, error };
   ctx.postMessage(msg, transfer);
 }
-

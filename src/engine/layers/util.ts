@@ -14,14 +14,13 @@ export interface Origin {
 export function flatPolygonGeometry(
   g: LayerGeometry,
   origin: Origin,
-  yLift = 0,
-): THREE.BufferGeometry {
-  if (g.kind !== "polygon" || !g.indices) throw new Error("polygon expected");
+): THREE.BufferGeometry | null {
+  if (g.kind !== "polygon" || !g.indices) return null;
   const vertCount = g.positions.length / 2;
   const verts = new Float32Array(vertCount * 3);
   for (let i = 0; i < vertCount; i++) {
     verts[i * 3 + 0] = g.positions[i * 2] - origin.x;
-    verts[i * 3 + 1] = yLift;
+    verts[i * 3 + 1] = 0;
     verts[i * 3 + 2] = -(g.positions[i * 2 + 1] - origin.y); // flip north→-Z
   }
   const geom = new THREE.BufferGeometry();
@@ -38,9 +37,9 @@ export function flatPolygonGeometry(
 export function extrudePolygons(
   g: LayerGeometry,
   origin: Origin,
-  fallbackHeightForClass: (cls: number) => number,
-): { geometry: THREE.BufferGeometry; featureRanges: Uint32Array; featureIds: Uint32Array } {
-  if (g.kind !== "polygon" || !g.indices) throw new Error("polygon expected");
+  fallbackHeight: (cls: number, featureIndex: number) => number,
+): { geometry: THREE.BufferGeometry; featureRanges: Uint32Array; featureIds: Uint32Array } | null {
+  if (g.kind !== "polygon" || !g.indices) return null;
   const positions: number[] = [];
   const indices: number[] = [];
   const featureRanges: number[] = [0]; // index ranges per feature (in indices array)
@@ -57,7 +56,7 @@ export function extrudePolygons(
     }
     const minH = g.featureMinHeight[fi];
     let topH = g.featureHeight[fi];
-    if (topH <= 0) topH = fallbackHeightForClass(g.featureClass[fi]);
+    if (topH <= 0) topH = fallbackHeight(g.featureClass[fi], fi);
     if (topH <= minH) topH = minH + 3;
 
     // Find local vertex set used by this feature's triangles.
@@ -138,18 +137,36 @@ export function extrudePolygons(
 }
 
 // Build a ribbon mesh from a LayerGeometry of line features.
-// Each feature is a single polyline. Per-class width comes from `widthLookup`.
+//
+// Emits a **shallow extruded box** per polyline so roads/rail have actual
+// physical thickness — visible from any angle, occludes things behind it,
+// receives shadows, can't be hidden by a 1-pixel quad coplanarity bug.
+//
+// Per polyline point we emit 4 verts (L_bot, R_bot, L_top, R_top). Per
+// segment we emit a top quad and two outward-facing side quads. No bottom
+// (saves tris; nothing renders below thanks to the engine's stage plate).
+export interface RibbonUVOpts {
+  /** Texture length period in metres along V. */
+  lengthPeriodM: number;
+  /** Side-vertex UV (neutral asphalt sample so kerbs don't show stripes). */
+  sideUV: { u: number; v: number };
+}
+
 export function ribbonGeometry(
   g: LayerGeometry,
   origin: Origin,
   widthLookup: (cls: number) => number,
-  yLift = 0.05,
-): { geometry: THREE.BufferGeometry; featureRanges: Uint32Array; featureIds: Uint32Array } {
-  if (g.kind !== "line") throw new Error("line expected");
+  thickness = 1.0,
+  uvOpts?: RibbonUVOpts,
+): { geometry: THREE.BufferGeometry; featureRanges: Uint32Array; featureIds: Uint32Array } | null {
+  if (g.kind !== "line") return null;
   const positions: number[] = [];
+  const uvs: number[] = [];
   const indices: number[] = [];
   const featureRanges: number[] = [0];
   const featureIds: number[] = [];
+  const yBot = 0;
+  const yTop = thickness;
 
   const featureCount = g.featureIds.length;
   for (let fi = 0; fi < featureCount; fi++) {
@@ -168,10 +185,18 @@ export function ribbonGeometry(
         z: -(g.positions[i * 2 + 1] - origin.y),
       });
     }
-    // Emit two vertices per point (left and right offsets along the normal).
+    // Cumulative arc length for V (only used if uvOpts is set).
+    const arc: number[] = [0];
+    if (uvOpts) {
+      for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i - 1].x;
+        const dz = pts[i].z - pts[i - 1].z;
+        arc.push(arc[i - 1] + Math.hypot(dx, dz));
+      }
+    }
     const baseVert = positions.length / 3;
+    // 4 verts per point: L_bot, R_bot, L_top, R_top
     for (let i = 0; i < pts.length; i++) {
-      // Tangent from neighbours.
       const p = pts[i];
       const prev = pts[Math.max(0, i - 1)];
       const next = pts[Math.min(pts.length - 1, i + 1)];
@@ -180,29 +205,64 @@ export function ribbonGeometry(
       const tLen = Math.hypot(tx, tz) || 1;
       tx /= tLen;
       tz /= tLen;
-      // Normal (perp in 2D, y-axis rotation): n = (-tz, tx)
       const nx = -tz;
       const nz = tx;
-      positions.push(p.x + nx * halfW, yLift, p.z + nz * halfW); // left
-      positions.push(p.x - nx * halfW, yLift, p.z - nz * halfW); // right
+      const lx = p.x + nx * halfW;
+      const lz = p.z + nz * halfW;
+      const rx = p.x - nx * halfW;
+      const rz = p.z - nz * halfW;
+      positions.push(lx, yBot, lz);
+      positions.push(rx, yBot, rz);
+      positions.push(lx, yTop, lz);
+      positions.push(rx, yTop, rz);
+      if (uvOpts) {
+        const v = arc[i] / uvOpts.lengthPeriodM;
+        const su = uvOpts.sideUV.u;
+        const sv = uvOpts.sideUV.v;
+        // L_bot, R_bot use neutral side UV; L_top is left edge (U=0),
+        // R_top is right edge (U=1). V along the road length.
+        uvs.push(su, sv); // L_bot
+        uvs.push(su, sv); // R_bot
+        uvs.push(0, v);   // L_top
+        uvs.push(1, v);   // R_top
+      }
     }
     for (let i = 0; i < pts.length - 1; i++) {
-      const a = baseVert + i * 2;
-      const b = a + 1;
-      const c = a + 2;
-      const d = a + 3;
-      indices.push(a, b, c);
-      indices.push(b, d, c);
+      const a = baseVert + i * 4;     // L_bot @ current
+      const al = a + 2;               // L_top @ current
+      const ar = a + 3;               // R_top @ current
+      const b = baseVert + (i + 1) * 4; // L_bot @ next
+      const bl = b + 2;               // L_top @ next
+      const br = b + 3;               // R_top @ next
+      // Top face — CCW when viewed from above (+Y), so the normal points up
+      // and the face survives back-face culling.
+      // L_top@cur → L_top@next → R_top@next → R_top@cur
+      indices.push(al, bl, br);
+      indices.push(al, br, ar);
+      // Left side (outward normal -X for a +Z-going segment).
+      // L_bot@cur → L_bot@next → L_top@next → L_top@cur
+      indices.push(a, b, bl);
+      indices.push(a, bl, al);
+      // Right side (outward normal +X for a +Z-going segment).
+      // R_top@cur → R_top@next → R_bot@next → R_bot@cur
+      indices.push(ar, br, b + 1);
+      indices.push(ar, b + 1, a + 1);
+      // Bottom face — CCW when viewed from below (-Y), so normal points down.
+      // L_bot@cur → R_bot@cur → R_bot@next → L_bot@next
+      indices.push(a, a + 1, b + 1);
+      indices.push(a, b + 1, b);
     }
     featureRanges.push(indices.length);
     featureIds.push(g.featureIds[fi]);
   }
 
   const posArr = new Float32Array(positions);
+  const vertCount = positions.length / 3;
   const idxArr =
-    positions.length / 3 < 65535 ? new Uint16Array(indices) : new Uint32Array(indices);
+    vertCount < 65535 ? new Uint16Array(indices) : new Uint32Array(indices);
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
+  if (uvOpts) geom.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(uvs), 2));
   geom.setIndex(new THREE.BufferAttribute(idxArr, 1));
   geom.computeVertexNormals();
 

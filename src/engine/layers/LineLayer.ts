@@ -1,5 +1,6 @@
-// Generic line-feature layer used by Roads, Rail, Paths. Builds a flat ribbon
-// at a layer-specific y-lift; each feature's width comes from a width LUT.
+// Generic line-feature layer used by Roads, Rail, Paths, Waterways. Each
+// polyline becomes a shallow extruded box (top + sides) with optional UV
+// mapping for a procedural surface texture.
 
 import * as THREE from "three";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
@@ -12,9 +13,17 @@ export interface LineLayerOptions {
   baseColor: THREE.ColorRepresentation;
   emissive: THREE.ColorRepresentation;
   emissiveIntensity: number;
-  yLift: number;
   width: (cls: number) => number;
+  thickness?: number;
+  yLift?: number;
   glowAtNight?: boolean;
+  constantGlow?: number;
+  /** Optional procedural texture for the top face. */
+  texture?: THREE.Texture;
+  /** Required when `texture` is set — controls how V maps along road length. */
+  textureLengthM?: number;
+  /** Required when `texture` is set — UV for side faces (no stripes). */
+  textureSideUV?: { u: number; v: number };
 }
 
 interface LHandle extends TileMeshHandle {
@@ -31,37 +40,68 @@ export class LineLayer implements Layer {
   private handles = new Map<string, LHandle>();
   private baseEmissive: number;
   private glowAtNight: boolean;
+  private constantGlow: number;
 
   constructor(private readonly opts: LineLayerOptions) {
     this.name = opts.name;
     this.root.name = `layer:${opts.name}`;
+    this.root.position.y = opts.yLift ?? 0;
     this.baseEmissive = opts.emissiveIntensity;
     this.glowAtNight = opts.glowAtNight ?? true;
+    this.constantGlow = opts.constantGlow ?? 0;
     this.material = makeGlowMaterial({
       baseColor: opts.baseColor,
       emissive: opts.emissive,
       emissiveIntensity: opts.emissiveIntensity,
-      roughness: 0.6,
-      metalness: 0.2,
+      roughness: 0.85,
+      metalness: 0.0,
     });
+    if (opts.texture) {
+      this.material.map = opts.texture;
+      this.material.needsUpdate = true;
+    }
   }
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
-    const { geometry, featureRanges, featureIds } = ribbonGeometry(
-      g,
-      ctx.sceneOrigin,
-      this.opts.width,
-      this.opts.yLift,
-    );
+    const thickness = this.opts.thickness ?? 1.0;
+    let geometry: THREE.BufferGeometry;
+    let featureRanges: Uint32Array;
+    let featureIds: Uint32Array;
+
+    // Prefer the worker-baked mesh when available — moves the per-tile
+    // ribbon-extrude cost off the main thread.
+    const baked = tile.bakedLines?.[this.name];
+    if (baked && baked.featureIds.length > 0) {
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(baked.positions, 3));
+      geometry.setIndex(new THREE.BufferAttribute(baked.indices, 1));
+      if (baked.uvs) geometry.setAttribute("uv", new THREE.BufferAttribute(baked.uvs, 2));
+      geometry.computeVertexNormals();
+      featureRanges = baked.featureRanges;
+      featureIds = baked.featureIds;
+    } else {
+      const uvOpts =
+        this.opts.texture && this.opts.textureLengthM && this.opts.textureSideUV
+          ? { lengthPeriodM: this.opts.textureLengthM, sideUV: this.opts.textureSideUV }
+          : undefined;
+      const built = ribbonGeometry(g, ctx.sceneOrigin, this.opts.width, thickness, uvOpts);
+      if (!built) return null;
+      geometry = built.geometry;
+      featureRanges = built.featureRanges;
+      featureIds = built.featureIds;
+    }
     if (featureIds.length === 0) {
       geometry.dispose();
       return null;
     }
     const vertCount = (geometry.getAttribute("position") as THREE.BufferAttribute).count;
     geometry.setAttribute("selected", new THREE.BufferAttribute(new Float32Array(vertCount), 1));
+
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.userData.layer = this.name;
     mesh.userData.tileKey = `${tile.z}/${tile.x}/${tile.y}`;
+    mesh.castShadow = thickness >= 0.5;
+    mesh.receiveShadow = true;
     this.root.add(mesh);
     const tileKey = `${tile.z}/${tile.x}/${tile.y}`;
     const globalIds = new Array<string>(featureIds.length);
@@ -89,8 +129,8 @@ export class LineLayer implements Layer {
   }
 
   update(_t: number, sunAltitude: number, glow: number): void {
-    if (!this.glowAtNight) return;
-    const night = Math.max(0, -sunAltitude); // 0..1-ish
-    this.material.emissiveIntensity = this.baseEmissive + night * 1.5 * glow;
+    const night = Math.max(0, -sunAltitude);
+    const fromNight = this.glowAtNight ? night * 1.5 * glow : 0;
+    this.material.emissiveIntensity = this.baseEmissive + this.constantGlow * glow + fromNight;
   }
 }

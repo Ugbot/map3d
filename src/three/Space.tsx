@@ -1,33 +1,21 @@
-// Thin React shell that mounts the vanilla-Three Engine and forwards layer/
-// time-of-day toggles from the zustand stores. Selection events surface here
-// and bubble up via `onSelect` so the InfoPopup can show attributes.
-//
-// This file deliberately contains no Three.js calls — everything Three-side
-// lives in `src/engine/`. That's the composability boundary.
+// Thin React shell. Mounts the vanilla-Three engine, forwards layer/time
+// settings, surfaces selection events. Re-mounts the engine on provider switch.
 
 import { useEffect, useRef, useState } from "react";
 import { useAreaStore } from "@/state/areaStore";
 import { useCityStore } from "@/state/cityStore";
 import { useLayerStore } from "@/state/layerStore";
 import { useTimeStore } from "@/state/timeStore";
+import { useProviderStore } from "@/state/providerStore";
 import { Engine } from "@/engine/Engine";
 import type { LayerName } from "@/cache/types";
 import { InfoPopup } from "@/ui/InfoPopup";
-
-// Composability: PMTiles source resolved at runtime so a future backend can
-// stand in (a thin proxy that returns MVTs on the same URL shape works).
-function resolvePmtilesUrl(): string {
-  const fromLocal = typeof localStorage !== "undefined" && localStorage.getItem("map3d.pmtiles_url");
-  if (fromLocal) return fromLocal;
-  const fromEnv = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_PMTILES_URL;
-  if (fromEnv) return fromEnv;
-  // Public Protomaps sample (NYC region, older daily build).
-  return "https://r2-public.protomaps.com/protomaps-sample-datasets/protomaps-basemap-opensource-20230408.pmtiles";
-}
+import { DebugHUD } from "@/ui/DebugHUD";
 
 export function Space() {
   const isReady = useCityStore((s) => s.isReady);
-  const center = useAreaStore((s) => s.center);
+  const pick = useAreaStore((s) => s.pick);
+  const provider = useProviderStore((s) => s.provider);
   const layers = useLayerStore((s) => s.layers);
   const setSelection = useLayerStore((s) => s.setSelection);
   const hour = useTimeStore((s) => s.hour);
@@ -36,7 +24,7 @@ export function Space() {
   const setHour = useTimeStore((s) => s.set);
 
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const engineRef = useRef<Engine | null>(null);
+  const [engine, setEngine] = useState<Engine | null>(null);
   const [popup, setPopup] = useState<{
     layer: LayerName;
     globalId: string;
@@ -44,20 +32,14 @@ export function Space() {
     screenY: number;
   } | null>(null);
 
-  // Mount engine when entering 3D view (isReady becomes true + center set).
   useEffect(() => {
     if (!isReady) return;
     if (!hostRef.current) return;
-    if (!center || center.length < 2) return;
-    const bbox = {
-      west: center[1].lng,
-      south: center[1].lat,
-      east: center[0].lng,
-      north: center[0].lat,
-    };
-    const engine = new Engine(hostRef.current, {
-      pmtilesUrl: resolvePmtilesUrl(),
-      bbox,
+    if (!pick) return;
+    const eng = new Engine(hostRef.current, {
+      provider,
+      center: { lat: pick.lat, lng: pick.lng },
+      ringRadius: 4,
       onSelect: (layer, globalId, x, y) => {
         if (!globalId) {
           setPopup(null);
@@ -68,32 +50,29 @@ export function Space() {
         setSelection({ layer, featureGlobalId: globalId });
       },
     });
-    engineRef.current = engine;
-    engine.start();
+    setEngine(eng);
+    eng.start();
     return () => {
-      engine.dispose();
-      engineRef.current = null;
+      eng.dispose();
+      setEngine(null);
     };
-  }, [isReady, center, setSelection]);
+    // Re-mount when provider changes so the worker schema is reinit'd cleanly.
+  }, [isReady, pick, provider, setSelection]);
 
-  // Forward layer state to engine.
   useEffect(() => {
-    const eng = engineRef.current;
-    if (!eng) return;
+    if (!engine) return;
     for (const name in layers) {
       const ln = name as LayerName;
-      eng.setLayerVisible(ln, layers[ln].visible);
-      eng.setLayerOpacity(ln, layers[ln].opacity);
-      eng.setLayerGlow(ln, layers[ln].glow);
+      engine.setLayerVisible(ln, layers[ln].visible);
+      engine.setLayerOpacity(ln, layers[ln].opacity);
+      engine.setLayerGlow(ln, layers[ln].glow);
     }
-  }, [layers]);
+  }, [layers, engine]);
 
-  // Forward hour + autoplay.
   useEffect(() => {
-    const eng = engineRef.current;
-    if (!eng) return;
-    eng.setHour(hour);
-  }, [hour]);
+    if (!engine) return;
+    engine.setHour(hour);
+  }, [hour, engine]);
 
   useEffect(() => {
     if (!autoplay) return;
@@ -120,17 +99,18 @@ export function Space() {
         ref={hostRef}
         style={{ position: "absolute", inset: 0, overflow: "hidden", background: "#0b1020" }}
       />
+      <DebugHUD engine={engine} />
       {popup && (
         <InfoPopup
           layer={popup.layer}
           globalId={popup.globalId}
           screenX={popup.screenX}
           screenY={popup.screenY}
-          engine={engineRef.current}
+          engine={engine}
           onClose={() => {
             setPopup(null);
             setSelection(null);
-            engineRef.current?.highlight(null, null);
+            engine?.highlight(null, null);
           }}
         />
       )}

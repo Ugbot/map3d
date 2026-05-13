@@ -18,6 +18,7 @@ import type { LayerContext } from "./Layer";
 import type { LayerName, ParsedTile } from "../cache/types";
 import type { TileStore } from "../cache/types";
 import { WorkerPool } from "../workers/pool";
+import { DERIVED_SOURCES } from "./layers";
 
 interface LoadedTile {
   key: string;
@@ -29,14 +30,18 @@ interface LoadedTile {
 }
 
 export interface TileManagerOptions {
-  pmtilesUrl: string;
+  /** @deprecated unused; tile source is configured per-worker via init payload. */
+  pmtilesUrl?: string;
   baseZoom?: number;
-  ringRadius?: number; // tiles outwards from camera tile (1 ring = 3x3 = 9 tiles)
-  bufferRings?: number; // extra rings before eviction kicks in
+  ringRadius?: number;
+  bufferRings?: number;
+  cacheVersion: number;
   sceneOrigin: { x: number; y: number };
   layers: Record<LayerName, Layer>;
   store: TileStore;
   workers: WorkerPool;
+  /** Forwarded to every worker on init. */
+  workerInitPayload: unknown;
   onProgress?: (loaded: number, inflight: number) => void;
   onSelect?: (layer: LayerName, featureGlobalId: string) => void;
   onTileLoaded?: (tile: ParsedTile) => void;
@@ -47,6 +52,12 @@ export class TileManager {
   private loaded = new Map<string, LoadedTile>();
   private inflight = new Set<string>();
   private cancelled = new Set<string>();
+  // Parsed tiles that arrived but haven't been installed to layers yet.
+  // Throttling installation prevents frame freezes when many tiles arrive at
+  // once (the ribbon-extrude geometry generation is non-trivial main-thread
+  // work — even with workers doing the parse).
+  private installQueue: ParsedTile[] = [];
+  private static readonly INSTALLS_PER_FRAME = 2;
   private readonly baseZoom: number;
   private readonly ringRadius: number;
   private readonly bufferRings: number;
@@ -63,17 +74,9 @@ export class TileManager {
     };
   }
 
-  /** Initialise the worker pool against the PMTiles URL. */
+  /** Initialise every worker with the provider config. */
   async init(): Promise<void> {
-    for (let i = 0; i < (navigator.hardwareConcurrency || 2); i++) {
-      // pool.request fans out round-robin; we send init to every worker so each
-      // one has its own PMTiles instance.
-      try {
-        await this.opts.workers.request("init", { url: this.opts.pmtilesUrl });
-      } catch {
-        // already initialised on that worker
-      }
-    }
+    await this.opts.workers.broadcast("init", this.opts.workerInitPayload).catch(() => null);
   }
 
   /** Optionally clamp streaming to a bbox (e.g. the user's selection). */
@@ -83,6 +86,12 @@ export class TileManager {
 
   /** Called every frame from Engine.update. */
   poll(cameraWorldX: number, cameraWorldZ: number): void {
+    // Drain a small number of pending installs each frame to avoid spike-load
+    // freezes when many tiles arrive back-to-back.
+    for (let n = 0; n < TileManager.INSTALLS_PER_FRAME && this.installQueue.length > 0; n++) {
+      const next = this.installQueue.shift()!;
+      this.installTile(next);
+    }
     // cameraWorldX/Z are scene-local; reconstruct mercator metres by adding back origin.
     const mx = cameraWorldX + this.opts.sceneOrigin.x;
     const my = -cameraWorldZ + this.opts.sceneOrigin.y;
@@ -153,7 +162,7 @@ export class TileManager {
     this.inflight.add(key);
     this.opts.onProgress?.(this.loaded.size, this.inflight.size);
     try {
-      let parsed = await this.opts.store.getParsed(z, x, y, 1);
+      let parsed = await this.opts.store.getParsed(z, x, y, this.opts.cacheVersion);
       if (!parsed) {
         if (this.cancelled.has(key)) {
           this.cancelled.delete(key);
@@ -168,6 +177,7 @@ export class TileManager {
           return;
         }
         parsed = res.tile;
+        parsed.version = this.opts.cacheVersion;
         this.opts.store.putParsed(parsed).catch((e) => console.warn("cache put failed", e));
       }
       if (this.cancelled.has(key)) {
@@ -175,7 +185,8 @@ export class TileManager {
         this.inflight.delete(key);
         return;
       }
-      this.installTile(parsed);
+      // Defer installation — drained at most INSTALLS_PER_FRAME per poll.
+      this.installQueue.push(parsed);
     } catch (err) {
       console.warn("tile fetch failed", key, err);
     } finally {
@@ -188,12 +199,23 @@ export class TileManager {
     const key = tileKey(parsed.z, parsed.x, parsed.y);
     if (this.loaded.has(key)) return; // raced with another caller
     const handles: LoadedTile["handles"] = {};
+    // Source-bearing layers first.
     for (const layerName in parsed.layers) {
       const ln = layerName as LayerName;
       const layer = this.opts.layers[ln];
       if (!layer) continue;
       const handle = layer.load(parsed, parsed.layers[ln]!, this.ctx);
       if (handle) handles[ln] = handle;
+    }
+    // Derived layers — e.g. streetlights riding on the roads SoA.
+    for (const ln in DERIVED_SOURCES) {
+      const target = ln as LayerName;
+      const source = DERIVED_SOURCES[target]!;
+      const data = parsed.layers[source];
+      const layer = this.opts.layers[target];
+      if (!data || !layer) continue;
+      const handle = layer.load(parsed, data, this.ctx);
+      if (handle) handles[target] = handle;
     }
     this.loaded.set(key, {
       key,

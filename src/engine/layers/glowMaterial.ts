@@ -14,9 +14,17 @@ export interface GlowMaterialOptions {
   opacity?: number;
   side?: THREE.Side;
   flatShading?: boolean;
+  // Polygon offset is what we actually use to layer flat polygons; the larger
+  // the factor/units, the further back the surface is pushed (so it shows
+  // *under* surfaces with smaller values).
+  polygonOffsetFactor?: number;
+  polygonOffsetUnits?: number;
+  // Use per-instance / per-vertex `color` attribute instead of the uniform.
+  vertexColors?: boolean;
 }
 
 export function makeGlowMaterial(opts: GlowMaterialOptions): THREE.MeshStandardMaterial {
+  const offset = opts.polygonOffsetFactor !== undefined || opts.polygonOffsetUnits !== undefined;
   const m = new THREE.MeshStandardMaterial({
     color: opts.baseColor,
     emissive: opts.emissive ?? 0x000000,
@@ -27,6 +35,10 @@ export function makeGlowMaterial(opts: GlowMaterialOptions): THREE.MeshStandardM
     opacity: opts.opacity ?? 1,
     side: opts.side ?? THREE.FrontSide,
     flatShading: opts.flatShading ?? false,
+    polygonOffset: offset,
+    polygonOffsetFactor: opts.polygonOffsetFactor ?? 0,
+    polygonOffsetUnits: opts.polygonOffsetUnits ?? 0,
+    vertexColors: opts.vertexColors ?? false,
   });
   // Inject a `selected` vertex attribute that boosts emissive on hover/select.
   m.onBeforeCompile = (shader) => {

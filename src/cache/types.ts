@@ -6,13 +6,19 @@
 // over the wire without touching the renderer.
 
 export type LayerName =
-  | "buildings"
+  | "earth"
+  | "landcover"
+  | "landuse"
+  | "water"
+  | "waterway"
+  | "paths"
   | "roads"
   | "rail"
-  | "water"
-  | "landuse"
-  | "paths"
-  | "pois";
+  | "buildings"
+  | "streetlights"
+  | "pois"
+  | "aircraft"
+  | "vessels";
 
 export type GeometryKind = "polygon" | "line" | "point";
 
@@ -36,6 +42,14 @@ export interface LayerGeometry {
   featureMinHeight: Float32Array;
 }
 
+export interface BakedLineMesh {
+  positions: Float32Array;
+  indices: Uint32Array;
+  uvs?: Float32Array;
+  featureRanges: Uint32Array;
+  featureIds: Uint32Array;
+}
+
 export interface ParsedTile {
   z: number;
   x: number;
@@ -44,8 +58,11 @@ export interface ParsedTile {
   version: number;
   // Per-layer SoA buffers. Absent layer = nothing to draw for it in this tile.
   layers: Partial<Record<LayerName, LayerGeometry>>;
+  // Pre-baked 3D ribbon meshes for line layers (roads/rail/paths/waterway),
+  // generated in the worker so the main thread doesn't pay the per-tile cost.
+  // Optional — if absent, LineLayer falls back to its on-main-thread builder.
+  bakedLines?: Partial<Record<LayerName, BakedLineMesh>>;
   // Per-feature attribute records, keyed by `${layerName}:${featureId}`.
-  // Kept sparse — most features have no popup-worthy data.
   attributes: Record<string, Record<string, string | number>>;
   // Bytes consumed (approximate, for cache budgeting).
   byteSize: number;

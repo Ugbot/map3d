@@ -3,17 +3,17 @@ import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { extrudePolygons } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
-import { BuildingClass } from "../../cache/classes";
 
-const FALLBACK_HEIGHT: Record<number, number> = {
-  [BuildingClass.residential]: 8,
-  [BuildingClass.commercial]: 18,
-  [BuildingClass.industrial]: 10,
-  [BuildingClass.civic]: 12,
-  [BuildingClass.religious]: 14,
-  [BuildingClass.transit]: 10,
-  [BuildingClass.unknown]: 9,
-};
+// Deterministic 0.8..1.4 hash for visual variation when render_height is 0.
+function jitter(tileKey: string, featureId: number): number {
+  let h = 2166136261;
+  const s = `${tileKey}:${featureId}`;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return 0.8 + (h & 0xff) / 0xff * 0.6;
+}
 
 interface BHandle extends TileMeshHandle {
   mesh: THREE.Mesh;
@@ -34,18 +34,23 @@ export class BuildingsLayer implements Layer {
   constructor() {
     this.root.name = "layer:buildings";
     this.material = makeGlowMaterial({
-      baseColor: 0x9aa3ad,
+      baseColor: 0xc3c8d0,
       emissive: 0x1a1f2a,
-      emissiveIntensity: 0.05,
-      roughness: 0.75,
-      metalness: 0.1,
+      emissiveIntensity: 0.04,
+      roughness: 0.72,
+      metalness: 0.12,
     });
   }
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
-    const { geometry, featureRanges, featureIds } = extrudePolygons(g, ctx.sceneOrigin, (cls) =>
-      FALLBACK_HEIGHT[cls] ?? FALLBACK_HEIGHT[BuildingClass.unknown],
-    );
+    const tileKey = `${tile.z}/${tile.x}/${tile.y}`;
+    const extruded = extrudePolygons(g, ctx.sceneOrigin, (_cls, fi) => {
+      // Fallback when render_height isn't present: 12 m × per-feature jitter.
+      const fid = g.featureIds[fi];
+      return 12 * jitter(tileKey, fid);
+    });
+    if (!extruded) return null;
+    const { geometry, featureRanges, featureIds } = extruded;
     if (featureIds.length === 0) {
       geometry.dispose();
       return null;
@@ -71,11 +76,10 @@ export class BuildingsLayer implements Layer {
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.userData.layer = "buildings";
     mesh.userData.tileKey = `${tile.z}/${tile.x}/${tile.y}`;
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     this.root.add(mesh);
 
-    const tileKey = `${tile.z}/${tile.x}/${tile.y}`;
     const globalIds = new Array<string>(featureIds.length);
     for (let i = 0; i < featureIds.length; i++) {
       globalIds[i] = `${tileKey}:${featureIds[i]}`;

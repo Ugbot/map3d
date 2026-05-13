@@ -34,9 +34,9 @@ const KIND_TO_LAYER: Record<number, LayerName> = {
 };
 
 const KIND_SPEED: Record<number, number> = {
-  [KIND_VEHICLE]: 14, // m/s ~ 50 km/h
-  [KIND_TRAIN]: 22, // m/s ~ 80 km/h
-  [KIND_PEDESTRIAN]: 1.4, // m/s walking
+  [KIND_VEHICLE]: 18,
+  [KIND_TRAIN]: 30,
+  [KIND_PEDESTRIAN]: 1.6,
 };
 
 const KIND_COLOR: Record<number, number> = {
@@ -47,14 +47,26 @@ const KIND_COLOR: Record<number, number> = {
 
 const KIND_SIZE: Record<number, [number, number, number]> = {
   [KIND_VEHICLE]: [3, 1.6, 5],
-  [KIND_TRAIN]: [3, 3, 20],
+  [KIND_TRAIN]: [4, 3.5, 30],
   [KIND_PEDESTRIAN]: [0.6, 1.8, 0.6],
 };
 
 const KIND_CAPACITY: Record<number, number> = {
-  [KIND_VEHICLE]: 400,
-  [KIND_TRAIN]: 24,
-  [KIND_PEDESTRIAN]: 250,
+  [KIND_VEHICLE]: 4000,
+  [KIND_TRAIN]: 120,
+  [KIND_PEDESTRIAN]: 1200,
+};
+
+const KIND_DAY_EMISSIVE: Record<number, number> = {
+  [KIND_VEHICLE]: 0.15,
+  [KIND_TRAIN]: 0.4,
+  [KIND_PEDESTRIAN]: 0.1,
+};
+
+const KIND_TARGET_PER_PATH: Record<number, number> = {
+  [KIND_VEHICLE]: 3.0,
+  [KIND_TRAIN]: 1.5,
+  [KIND_PEDESTRIAN]: 3.0,
 };
 
 export class Simulation {
@@ -72,9 +84,10 @@ export class Simulation {
       x: Float32Array;
       z: Float32Array;
       heading: Float32Array;
-      path: Int32Array; // -1 = unspawned
-      cursor: Float32Array; // metres along path
-      direction: Float32Array; // +1 or -1
+      /** null = unspawned. Direct reference avoids index-shift bugs on eviction. */
+      path: (Polyline | null)[];
+      cursor: Float32Array;
+      direction: Float32Array;
       mesh: THREE.InstancedMesh;
       material: THREE.MeshStandardMaterial;
     }
@@ -94,7 +107,7 @@ export class Simulation {
       const mat = new THREE.MeshStandardMaterial({
         color: KIND_COLOR[kind],
         emissive: KIND_COLOR[kind],
-        emissiveIntensity: 0.4,
+        emissiveIntensity: KIND_DAY_EMISSIVE[kind],
         roughness: 0.4,
         metalness: 0.3,
       });
@@ -107,7 +120,9 @@ export class Simulation {
         x: new Float32Array(cap),
         z: new Float32Array(cap),
         heading: new Float32Array(cap),
-        path: new Int32Array(cap).fill(-1),
+        // Reference paths by object directly so tile eviction (which splices
+        // pathsByKind arrays) can't silently corrupt agent assignments.
+        path: new Array<Polyline | null>(cap).fill(null),
         cursor: new Float32Array(cap),
         direction: new Float32Array(cap).fill(1),
         mesh,
@@ -193,6 +208,19 @@ export class Simulation {
   releaseTile(tileKey: string) {
     const paths = this.pathsByTile.get(tileKey);
     if (!paths) return;
+    const evictedSet = new Set<Polyline>(paths);
+    // Respawn agents on evicted paths BEFORE we mutate the path arrays — that
+    // way the agent has a fresh valid reference and never observes the array
+    // mid-mutation.
+    for (const kindStr in this.agents) {
+      const kind = parseInt(kindStr, 10);
+      const a = this.agents[kind];
+      for (let i = 0; i < a.path.length; i++) {
+        const p = a.path[i];
+        if (p && evictedSet.has(p)) this.respawnAgent(kind, i);
+      }
+    }
+    // Now drop the evicted paths from the per-kind arrays.
     for (const p of paths) {
       const kind = this.kindFromPath(p);
       const arr = this.pathsByKind.get(kind)!;
@@ -200,34 +228,22 @@ export class Simulation {
       if (idx >= 0) arr.splice(idx, 1);
     }
     this.pathsByTile.delete(tileKey);
-    // Reassign any agent that was on a now-evicted path.
-    for (const kindStr in this.agents) {
-      const kind = parseInt(kindStr, 10);
-      const a = this.agents[kind];
-      const list = this.pathsByKind.get(kind)!;
-      for (let i = 0; i < a.path.length; i++) {
-        if (a.path[i] < 0) continue;
-        if (a.path[i] >= list.length) {
-          this.respawnAgent(kind, i);
-        }
-      }
-    }
   }
 
   private targetCount(kind: number): number {
     const paths = this.pathsByKind.get(kind)!.length;
-    // Roughly one agent per 2 polylines, capped at capacity.
-    return Math.min(KIND_CAPACITY[kind], Math.floor(paths / 2));
+    const ratio = KIND_TARGET_PER_PATH[kind] ?? 1;
+    return Math.min(KIND_CAPACITY[kind], Math.floor(paths * ratio));
   }
 
   private spawnUpTo(kind: number, n: number) {
     const a = this.agents[kind];
     let active = 0;
-    for (let i = 0; i < a.path.length; i++) if (a.path[i] >= 0) active++;
+    for (let i = 0; i < a.path.length; i++) if (a.path[i]) active++;
     for (let i = 0; i < a.path.length && active < n; i++) {
-      if (a.path[i] < 0) {
+      if (!a.path[i]) {
         this.respawnAgent(kind, i);
-        active++;
+        if (a.path[i]) active++;
       }
     }
     a.mesh.count = active;
@@ -237,12 +253,11 @@ export class Simulation {
     const a = this.agents[kind];
     const list = this.pathsByKind.get(kind)!;
     if (list.length === 0) {
-      a.path[i] = -1;
+      a.path[i] = null;
       return;
     }
-    const pIdx = Math.floor(Math.random() * list.length);
-    const p = list[pIdx];
-    a.path[i] = pIdx;
+    const p = list[Math.floor(Math.random() * list.length)];
+    a.path[i] = p;
     a.cursor[i] = Math.random() * p.total;
     a.direction[i] = Math.random() < 0.5 ? 1 : -1;
     this.sampleAlongPath(p, a.cursor[i], i, a);
@@ -279,28 +294,18 @@ export class Simulation {
     for (const kindStr in this.agents) {
       const kind = parseInt(kindStr, 10);
       const a = this.agents[kind];
-      const list = this.pathsByKind.get(kind)!;
       const baseSpeed = KIND_SPEED[kind];
       let active = 0;
       for (let i = 0; i < a.path.length; i++) {
-        if (a.path[i] < 0) continue;
-        const p = list[a.path[i]];
-        if (!p) {
-          a.path[i] = -1;
-          continue;
-        }
+        let p = a.path[i];
+        if (!p) continue;
         a.cursor[i] += baseSpeed * a.direction[i] * dt;
         if (a.cursor[i] >= p.total || a.cursor[i] <= 0) {
-          // Try to continue onto a path with a near endpoint.
           this.tryHop(kind, i, p);
-          if (a.path[i] < 0) continue;
+          p = a.path[i];
+          if (!p) continue;
         }
-        const cur = a.path[i] >= 0 ? list[a.path[i]] : null;
-        if (!cur) {
-          a.path[i] = -1;
-          continue;
-        }
-        this.sampleAlongPath(cur, a.cursor[i], i, a);
+        this.sampleAlongPath(p, a.cursor[i], i, a);
         this.dummy.position.set(a.x[i], KIND_SIZE[kind][1] / 2, a.z[i]);
         this.dummy.rotation.set(0, a.heading[i], 0);
         this.dummy.updateMatrix();
@@ -315,17 +320,13 @@ export class Simulation {
   private tryHop(kind: number, i: number, current: Polyline) {
     const a = this.agents[kind];
     const list = this.pathsByKind.get(kind)!;
-    // Determine current endpoint position.
     const endIdx = a.direction[i] > 0 ? current.flat.length / 2 - 1 : 0;
     const ex = current.flat[endIdx * 2];
     const ez = current.flat[endIdx * 2 + 1];
-    const RADIUS = 30; // metres
-    // Try a small random sample to keep this O(K).
+    const RADIUS = 30;
     for (let k = 0; k < 8; k++) {
-      const j = Math.floor(Math.random() * list.length);
-      const cand = list[j];
+      const cand = list[Math.floor(Math.random() * list.length)];
       if (cand === current) continue;
-      // Check both ends.
       const lastV = cand.flat.length / 2 - 1;
       const dxA = cand.flat[0] - ex;
       const dzA = cand.flat[1] - ez;
@@ -334,28 +335,27 @@ export class Simulation {
       const dA = dxA * dxA + dzA * dzA;
       const dB = dxB * dxB + dzB * dzB;
       if (dA < RADIUS * RADIUS) {
-        a.path[i] = j;
+        a.path[i] = cand;
         a.cursor[i] = 0;
         a.direction[i] = 1;
         return;
       }
       if (dB < RADIUS * RADIUS) {
-        a.path[i] = j;
+        a.path[i] = cand;
         a.cursor[i] = cand.total;
         a.direction[i] = -1;
         return;
       }
     }
-    // Fall back: pick a random new path.
     this.respawnAgent(kind, i);
   }
 
-  /** Glow ramp for night. Engine drives this. */
+  /** Glow ramp for night. Engine drives this. Day baseline stays visible. */
   setNight(t: number) {
     for (const kindStr in this.agents) {
       const kind = parseInt(kindStr, 10);
       const a = this.agents[kind];
-      a.material.emissiveIntensity = 0.3 + t * 1.4;
+      a.material.emissiveIntensity = KIND_DAY_EMISSIVE[kind] + t * 1.6;
     }
   }
 }
