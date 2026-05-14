@@ -59,8 +59,15 @@ export interface EmscriptenModule {
   [exportName: `_${string}`]: ((...args: any[]) => any) | undefined;
 }
 
+/** MODULARIZE=1 factory exposed by Emscripten as `var city = (() => ...)()`. */
+export type CityFactory = (
+  moduleArg?: Partial<EmscriptenModule>,
+) => Promise<EmscriptenModule>;
+
 declare global {
   interface Window {
     Module?: Partial<EmscriptenModule>;
+    /** Set by city.js when built with MODULARIZE=1. */
+    city?: CityFactory;
   }
 }

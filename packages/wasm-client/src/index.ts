@@ -41,39 +41,33 @@ function setStatus(state: WsState | "engine-missing", text?: string): void {
   txt.textContent = text ?? state;
 }
 
-/** Load /flecs/city.js as a classic <script> and resolve once the
- *  Emscripten runtime has fired onRuntimeInitialized. The Promise rejects
- *  on script load error (e.g. the file hasn't been built yet). */
+/** Load /flecs/city.js and instantiate the runtime.
+ *
+ *  We support both Emscripten output shapes:
+ *  - MODULARIZE=1 (bake's em target uses this): the script defines a global
+ *    factory (`window.city`) that returns a Promise<Module> when invoked.
+ *  - Plain script (no MODULARIZE): the glue reads `window.Module` at top
+ *    level and calls `Module.onRuntimeInitialized` when ready.
+ *
+ *  The factory path is preferred because it lets us pass `canvas`, `print`,
+ *  etc. as constructor args instead of side-effecting a global. */
 function loadCityModule(): Promise<EmscriptenModule> {
   return new Promise((resolve, reject) => {
-    // Pre-install Module with our hooks. city.js (plain script build) reads
-    // window.Module at top-level and merges; MODULARIZE=1 builds expose a
-    // factory instead — we handle that branch below in onload.
     const canvas = document.getElementById("canvas");
     if (!(canvas instanceof HTMLCanvasElement)) {
       reject(new Error("boot: #canvas missing or not a canvas"));
       return;
     }
 
-    const existing = (window.Module ?? {}) as Partial<EmscriptenModule>;
-    const moduleStub: Partial<EmscriptenModule> = {
-      ...existing,
+    const moduleArg: Partial<EmscriptenModule> = {
       canvas,
       noInitialRun: false,
       print: (m: string) => console.log("[city]", m),
       printErr: (m: string) => console.warn("[city]", m),
       onAbort: (what: unknown) => reject(new Error("city abort: " + String(what))),
-      onRuntimeInitialized: () => {
-        // window.Module at this point is the fully-initialised runtime.
-        const m = window.Module as EmscriptenModule | undefined;
-        if (m == null || typeof m.cwrap !== "function") {
-          reject(new Error("city runtime ready but cwrap missing"));
-          return;
-        }
-        resolve(m);
-      },
     };
-    window.Module = moduleStub;
+    // Pre-install for the non-MODULARIZE branch.
+    window.Module = { ...moduleArg };
 
     const s = document.createElement("script");
     s.src = CITY_JS_URL;
@@ -84,6 +78,39 @@ function loadCityModule(): Promise<EmscriptenModule> {
           `failed to load ${CITY_JS_URL} — run \`bake build\` in external/city and copy the artefacts into packages/wasm-client/public/flecs/`,
         ),
       );
+    s.onload = () => {
+      // MODULARIZE branch first: bake's em build defines `var city = ...`
+      // at module scope. With Emscripten >= 3.x, that factory returns a
+      // Promise<Module>.
+      const factory = window.city;
+      if (typeof factory === "function") {
+        factory({ ...moduleArg })
+          .then((m) => {
+            if (typeof m.cwrap !== "function") {
+              reject(new Error("city runtime ready but cwrap missing"));
+              return;
+            }
+            resolve(m);
+          })
+          .catch(reject);
+        return;
+      }
+      // Plain-script branch: the glue wires onRuntimeInitialized on the
+      // pre-installed window.Module. Re-bind it now that the script has
+      // executed (it may have replaced Module wholesale).
+      const m = window.Module as EmscriptenModule | undefined;
+      if (m == null) {
+        reject(new Error("city.js loaded but window.Module is undefined"));
+        return;
+      }
+      m.onRuntimeInitialized = () => {
+        if (typeof m.cwrap !== "function") {
+          reject(new Error("city runtime ready but cwrap missing"));
+          return;
+        }
+        resolve(m);
+      };
+    };
     document.head.appendChild(s);
   });
 }
