@@ -31632,11 +31632,15 @@ typedef struct beam_mesh_vs_uniforms_t {
     mat4 u_mvp;
 } beam_mesh_vs_uniforms_t;
 
+/* Native (GL) uniform layout — vec3 = 12 bytes, no padding. Sokol's
+ * default UNIFORMLAYOUT_NATIVE expects the sum of FLOAT3 declared sizes
+ * (4 × 12 = 48) to equal the C struct size. The earlier std140-style
+ * float pads tripped VALIDATE_SHADERDESC_UB_SIZE_MISMATCH at startup. */
 typedef struct beam_mesh_fs_uniforms_t {
-    vec3 u_sun_dir;     float _pad0;
-    vec3 u_sun_col;     float _pad1;
-    vec3 u_ambient;     float _pad2;
-    vec3 u_base_color;  float _pad3;
+    vec3 u_sun_dir;
+    vec3 u_sun_col;
+    vec3 u_ambient;
+    vec3 u_base_color;
 } beam_mesh_fs_uniforms_t;
 
 static sg_pipeline beam_pip_solid = {0};
@@ -31747,9 +31751,9 @@ static void sokol_draw_beam_meshes(
     sg_apply_pipeline(beam_pip_solid);
 
     beam_mesh_fs_uniforms_t fs_u;
-    glm_vec3_copy(sun_dir, fs_u.u_sun_dir);     fs_u._pad0 = 0;
-    glm_vec3_copy(sun_col, fs_u.u_sun_col);     fs_u._pad1 = 0;
-    glm_vec3_copy(ambient, fs_u.u_ambient);     fs_u._pad2 = 0;
+    glm_vec3_copy(sun_dir, fs_u.u_sun_dir);
+    glm_vec3_copy(sun_col, fs_u.u_sun_col);
+    glm_vec3_copy(ambient, fs_u.u_ambient);
 
     uint32_t drawn = 0;
     ecs_iter_t qit = ecs_query_iter(world, beam_mesh_draw_query);
@@ -31775,7 +31779,7 @@ static void sokol_draw_beam_meshes(
             beam_mesh_vs_uniforms_t vs_u;
             glm_mat4_mul(view_proj, model, vs_u.u_mvp);
 
-            glm_vec3_copy(bm[i].color, fs_u.u_base_color); fs_u._pad3 = 0;
+            glm_vec3_copy(bm[i].color, fs_u.u_base_color);
 
             sg_apply_uniforms(SG_SHADERSTAGE_VS, 0,
                 &(sg_range){ &vs_u, sizeof(vs_u) });
