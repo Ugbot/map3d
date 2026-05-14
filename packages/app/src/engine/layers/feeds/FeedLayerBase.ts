@@ -7,7 +7,7 @@
 import * as THREE from "three";
 import { MeshStandardNodeMaterial, LineBasicNodeMaterial } from "three/webgpu";
 import type { Layer, LayerContext, TileMeshHandle } from "../../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../../cache/types";
+import type { LayerGeometry, LayerName, ParsedTile } from "@map3d/data-core";
 import {
   FLAG_IS_FEED,
   FLAG_ON_GROUND,

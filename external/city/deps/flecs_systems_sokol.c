@@ -3193,7 +3193,7 @@ inline int sg_append_buffer(sg_buffer buf_id, const sg_range& data) { return sg_
 #endif
 #endif // SOKOL_GFX_INCLUDED
 
-// ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ██�// ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
+// ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ██�// ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
 // ██ ██ ████ ██ ██████  ██      █████   ██ ████ ██ █████   ██ ██  ██    ██    ███████    ██    ██ ██    ██ ██ ██  ██
 // ██ ██  ██  ██ ██      ██      ██      ██  ██  ██ ██      ██  ██ ██    ██    ██   ██    ██    ██ ██    ██ ██  ██ ██
 // ██ ██      ██ ██      ███████ ███████ ██      ██ ███████ ██   ████    ██    ██   ██    ██    ██  ██████  ██   ████
@@ -5536,7 +5536,7 @@ _SOKOL_PRIVATE void _sg_dummy_update_image(_sg_image_t* img, const sg_image_data
     }
 }
 
-//  ██████  ██████  ███████ ███    ██  ██████  ██          ██████   █████   ██████ ██   ██ ███████ ███    ██ █████�// ██    ██ ██   ██ ██      ████   ██ ██       ██          ██   ██ ██   ██ ██      ██  ██  ██      ████   ██ ██   ██
+//  ██████  ██████  ███████ ███    ██  ██████  ██          ██████   █████   ██████ ██   ██ ███████ ███    ██ █████�// ██    ██ ██   ██ ██      ████   ██ ██       ██          ██   ██ ██   ██ ██      ██  ██  ██      ████   ██ ██   ██
 // ██    ██ ██████  █████   ██ ██  ██ ██   ███ ██          ██████  ███████ ██      █████   █████   ██ ██  ██ ██   ██
 // ██    ██ ██      ██      ██  ██ ██ ██    ██ ██          ██   ██ ██   ██ ██      ██  ██  ██      ██  ██ ██ ██   ██
 //  ██████  ██      ███████ ██   ████  ██████  ███████     ██████  ██   ██  ██████ ██   ██ ███████ ██   ████ ████//
@@ -12077,10 +12077,10 @@ _SOKOL_PRIVATE void _sg_mtl_update_image(_sg_image_t* img, const sg_image_data* 
     _sg_mtl_copy_image_data(img, mtl_tex, data);
 }
 
-// ██     ██ ███████ ██████   ██████  ██████  ██    ██     ██████   █████   ██████ ██   ██ ███████ ███    ██ ████�// ██     ██ ██      ██   ██ ██       ██   ██ ██    ██     ██   ██ ██   ██ ██      ██  ██  ██      ████   ██ ██   ██
+// ██     ██ ███████ ██████   ██████  ██████  ██    ██     ██████   █████   ██████ ██   ██ ███████ ███    ██ ████�// ██     ██ ██      ██   ██ ██       ██   ██ ██    ██     ██   ██ ██   ██ ██      ██  ██  ██      ████   ██ ██   ██
 // ██  █  ██ █████   ██████  ██   ███ ██████  ██    ██     ██████  ███████ ██      █████   █████   ██ ██  ██ ██   ██
 // ██ ███ ██ ██      ██   ██ ██    ██ ██      ██    ██     ██   ██ ██   ██ ██      ██  ██  ██      ██  ██ ██ ██   ██
-//  ███ ███  ███████ ██████   ██████  ██       ██████      ██████  ██   ██  ██████ ██   ██ ███████ ██   ████ ████�//
+//  ███ ███  ███████ ██████   ██████  ██       ██████      ██████  ██   ██  ██████ ██   ██ ███████ ██   ████ ████�//
 // >>webgpu backend
 #elif defined(SOKOL_WGPU)
 
@@ -13812,7 +13812,7 @@ _SOKOL_PRIVATE void _sg_wgpu_update_image(_sg_image_t* img, const sg_image_data*
 //  ██████  ███████ ███    ██ ███████ ██████  ██  ██████     ██████   █████   ██████ ██   ██ ███████ ███    ██ // ██       ██      ████   ██ ██      ██   ██ ██ ██          ██   ██ ██   ██ ██      ██  ██  ██      ████   ██ ██   ██
 // ██   ███ █████   ██ ██  ██ █████   ██████  ██ ██          ██████  ███████ ██      █████   █████   ██ ██  ██ ██   ██
 // ██    ██ ██      ██  ██ ██ ██      ██   ██ ██ ██          ██   ██ ██   ██ ██      ██  ██  ██      ██  ██ ██ ██   ██
-//  ██████  ███████ ██   ████ ███████ ██   ██ ██  ██████     ██████  ██   ██  ██████ ██   ██ ███████ ██   ████ �//
+//  ██████  ███████ ██   ████ ███████ ██   ██ ██  ██████     ██████  ██   ██  ██████ ██   ██ ███████ ██   ████ �//
 // >>generic backend
 static inline void _sg_setup_backend(const sg_desc* desc) {
     #if defined(_SOKOL_ANY_GL)
@@ -18950,7 +18950,7 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
 
 #endif // SOKOL_APP_INCLUDED
 
-// ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ██�// ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
+// ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ██�// ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
 // ██ ██ ████ ██ ██████  ██      █████   ██ ████ ██ █████   ██ ██  ██    ██    ███████    ██    ██ ██    ██ ██ ██  ██
 // ██ ██  ██  ██ ██      ██      ██      ██  ██  ██ ██      ██  ██ ██    ██    ██   ██    ██    ██ ██    ██ ██  ██ ██
 // ██ ██      ██ ██      ███████ ███████ ██      ██ ███████ ██   ████    ██    ██   ██    ██    ██  ██████  ██   ████
@@ -28777,7 +28777,7 @@ SOKOL_LOG_API_DECL void slog_func(const char* tag, uint32_t log_level, uint32_t 
 #endif
 #endif // SOKOL_LOG_INCLUDED
 
-// ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ██�// ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
+// ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ██�// ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
 // ██ ██ ████ ██ ██████  ██      █████   ██ ████ ██ █████   ██ ██  ██    ██    ███████    ██    ██ ██    ██ ██ ██  ██
 // ██ ██  ██  ██ ██      ██      ██      ██  ██  ██ ██      ██  ██ ██    ██    ██   ██    ██    ██ ██    ██ ██  ██ ██
 // ██ ██      ██ ██      ███████ ███████ ██      ██ ███████ ██   ████    ██    ██   ██    ██    ██  ██████  ██   ████
@@ -29999,6 +29999,67 @@ int sokol_run_action(
     return 0;
 }
 
+/* ---- BeamMesh sokol shims -------------------------------------------------
+ *
+ * These shims expose a sokol-free signature to src/beam_mesh.c so it doesn't
+ * have to replicate the sokol_gfx struct layout. They live here because this
+ * TU is where SOKOL_IMPL is set, i.e. where the sg_* symbols are actually
+ * defined. The shims are pure wrappers — no caching, no statics other than
+ * the readiness flag.
+ *
+ * Readiness: sokol_gfx must be set up (sg_setup) before any sg_make_buffer
+ * is safe. The flecs module runs SokolInitRenderer on EcsOnLoad of the first
+ * frame that has a Canvas; the bridge may queue uploads earlier. Callers
+ * check beam_sokol_is_ready() and retry later if false. */
+static bool beam_sokol_ready = false;
+
+uint32_t beam_sokol_make_vbuf_f32(const float *data, uint32_t n_floats) {
+    if (!beam_sokol_ready || !data || !n_floats) return 0;
+    sg_buffer buf = sg_make_buffer(&(sg_buffer_desc){
+        .type = SG_BUFFERTYPE_VERTEXBUFFER,
+        .usage = SG_USAGE_IMMUTABLE,
+        .data = (sg_range){
+            .ptr = data,
+            .size = (size_t)n_floats * sizeof(float)
+        },
+        .label = "beam_mesh.vbuf"
+    });
+    return buf.id;
+}
+
+uint32_t beam_sokol_make_ibuf_u32(const uint32_t *data, uint32_t n_indices) {
+    if (!beam_sokol_ready || !data || !n_indices) return 0;
+    sg_buffer buf = sg_make_buffer(&(sg_buffer_desc){
+        .type = SG_BUFFERTYPE_INDEXBUFFER,
+        .usage = SG_USAGE_IMMUTABLE,
+        .data = (sg_range){
+            .ptr = data,
+            .size = (size_t)n_indices * sizeof(uint32_t)
+        },
+        .label = "beam_mesh.ibuf"
+    });
+    return buf.id;
+}
+
+void beam_sokol_destroy_buf(uint32_t id) {
+    if (!beam_sokol_ready || !id) return;
+    sg_destroy_buffer((sg_buffer){ .id = id });
+}
+
+int beam_sokol_is_ready(void) {
+    return beam_sokol_ready && sg_isvalid();
+}
+
+/* Latch readiness once sg_setup has run. Called from SokolInitRenderer via a
+ * single tail invocation; safe to call more than once. */
+void beam_sokol_mark_ready(void) {
+    beam_sokol_ready = true;
+}
+
+/* Forward-declared so FlecsSystemsSokolImport can pull it in even though the
+ * definition lives in src/beam_mesh.c (different TU). */
+extern void FlecsSokolBeamMeshImport(ecs_world_t *world);
+
 void FlecsSystemsSokolImport(
     ecs_world_t *world)
 {
@@ -30007,12 +30068,18 @@ void FlecsSystemsSokolImport(
     ecs_set_name_prefix(world, "Sokol");
 
     ECS_COMPONENT_DEFINE(world, SokolQuery);
-    
+
     ECS_IMPORT(world, FlecsComponentsGui);
     ECS_IMPORT(world, FlecsComponentsInput);
 
     ECS_IMPORT(world, FlecsSystemsSokolRenderer);
     ECS_IMPORT(world, FlecsSystemsSokolGeometry);
+
+    /* BeamMesh primitive — registered after sokol_gfx has been wired up but
+     * before the first render. The component + on_remove hook are safe to
+     * register at import time; actual buffer creation is gated on
+     * beam_sokol_is_ready(). */
+    FlecsSokolBeamMeshImport(world);
 
     ecs_app_set_run_action(sokol_run_action);
 }
@@ -33186,6 +33253,9 @@ void SokolInitRenderer(ecs_iter_t *it) {
 
     assert(sg_isvalid());
     ecs_trace("sokol: library initialized");
+
+    /* Tell BeamMesh shims they can now make/destroy sokol buffers. */
+    beam_sokol_mark_ready();
 
     sokol_resources_t resources = sokol_init_resources();
     resources.bg_texture = sokol_bg_texture(canvas->background_color, 2, 2);

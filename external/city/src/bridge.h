@@ -46,6 +46,46 @@ EMSCRIPTEN_KEEPALIVE void beam_clear_all(void);
 
 EMSCRIPTEN_KEEPALIVE uint32_t beam_live_count(void);
 
+/* ---- Static tile geometry -------------------------------------------------
+ *
+ * The bridge groups static (non-agent, non-feed) entities under a tile key
+ * `BeamTileKey{z,x,y}` so the JS host can drop a tile by id when its
+ * viewport changes. Upserts must be wrapped in a begin/end pair; the open
+ * tile key is module-static state. */
+
+EMSCRIPTEN_KEEPALIVE void beam_tile_begin   (uint32_t z, uint32_t x, uint32_t y);
+EMSCRIPTEN_KEEPALIVE void beam_tile_end     (void);
+EMSCRIPTEN_KEEPALIVE void beam_tile_release (uint32_t z, uint32_t x, uint32_t y);
+
+/* kind: 0=building (CityBuilding), 1=modern (CityModernBuilding),
+ * 2=skyscraper (CityModernBuilding + scaled). color_rgb==0 means
+ * "inherit the prefab default". */
+EMSCRIPTEN_KEEPALIVE void beam_building_upsert(uint32_t remote_id, uint8_t kind,
+    float cx, float cy, float cz,
+    float sx, float sy, float sz,
+    float heading, uint32_t color_rgb);
+
+/* Generic triangulated mesh. positions_ptr / indices_ptr are uint32 offsets
+ * into the wasm linear memory (i.e. heap pointers the JS host obtained via
+ * _malloc). beam_mesh_upsert copies the bytes into fresh sokol buffers; the
+ * caller is responsible for _free'ing the heap allocations after this call
+ * returns. */
+EMSCRIPTEN_KEEPALIVE void beam_mesh_upsert(uint32_t remote_id, uint8_t layer_kind,
+    uint32_t positions_ptr, uint32_t n_floats,
+    uint32_t indices_ptr,   uint32_t n_indices,
+    uint32_t color_rgb,
+    float origin_x, float origin_y, float origin_z);
+EMSCRIPTEN_KEEPALIVE void beam_mesh_remove(uint32_t remote_id);
+
+/* Lantern (CityLantern prefab). */
+EMSCRIPTEN_KEEPALIVE void beam_lantern_upsert(uint32_t remote_id,
+    float x, float y, float z);
+
+/* prop_kind: 0=tree(CitySidewalkTree), 1=bin(CityBin),
+ *            2=hydrant(CityHydrant), 3=bench(CityBench). */
+EMSCRIPTEN_KEEPALIVE void beam_prop_upsert(uint32_t remote_id, uint8_t prop_kind,
+    float x, float y, float z, float heading);
+
 #ifdef __cplusplus
 }
 #endif

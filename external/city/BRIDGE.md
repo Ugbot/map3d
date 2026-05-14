@@ -80,6 +80,28 @@ direction; the packed `sun_color_rgb` becomes the light's `EcsRgb`. If
 the `light` entity isn't present (e.g. headless test) the system logs
 once via `ecs_dbg` and no-ops.
 
+## Static tile geometry
+
+OSM tile content (buildings, lanterns, props, arbitrary meshes) is streamed
+in tile-keyed batches. Every static entity created by the exports below is
+tagged with a `BeamTileKey{z, x, y}` component so `beam_tile_release(z,x,y)`
+can drop a whole tile in one query iteration.
+
+| Function | Purpose |
+|---|---|
+| `beam_tile_begin(z, x, y)` / `beam_tile_end()` | Open/close the "currently filling" tile. Required around every static upsert. Nested begins assert. |
+| `beam_tile_release(z, x, y)` | Delete every static entity tagged with this tile key. Sokol buffers held by `BeamMesh` are freed via its `on_remove` hook. |
+| `beam_building_upsert(id, kind, cx, cy, cz, sx, sy, sz, heading, color_rgb)` | kind: 0=building (`CityBuilding`), 1=modern (`CityModernBuilding`), 2=skyscraper (alias of modern, callers scale `sy` themselves). `color_rgb==0` inherits the prefab default. |
+| `beam_mesh_upsert(id, layer_kind, positions_ptr, n_floats, indices_ptr, n_indices, color_rgb, ox, oy, oz)` | Generic triangulated mesh primitive. `positions_ptr`/`indices_ptr` are heap pointers (`_malloc`); the wasm copies into immutable sokol buffers and the caller `_free`s after the call returns. `n_floats <= 16*1024*1024`, must be a multiple of 3; same bounds on `n_indices`; every index `< n_floats/3`. |
+| `beam_mesh_remove(id)` | Delete a previously-upserted mesh entity. |
+| `beam_lantern_upsert(id, x, y, z)` | Instantiates `IsA Lantern`. |
+| `beam_prop_upsert(id, prop_kind, x, y, z, heading)` | `prop_kind`: 0=`SidewalkTree`, 1=`Bin`, 2=`Hydrant`, 3=`Bench`. |
+
+`remote_id`s are unique within their family (building / mesh / lantern / prop).
+The bridge stores all static entities in one `ecs_map_t` keyed by
+`(family << 32) | id`. Family is determined by which exported function created
+the entry, so collisions across families never happen.
+
 ## Known limitations
 
 - `suppress_procedural_traffic` zeroes future spawns but leaves any

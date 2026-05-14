@@ -1,6 +1,8 @@
 // Node entry point: boots the bitECS world, drives the simulation tick,
-// runs feeds, and broadcasts keyframes over WebSocket. Tiger style: the
-// FrameEncoder is allocated once with a hard capacity; every tick reuses it.
+// runs feeds, fetches and parses PMTiles per client, and ships per-client
+// keyframes containing shared world sections plus client-specific TILE_*
+// sections. Tiger style: every per-client FrameEncoder is preallocated with a
+// hard capacity and reused every tick.
 
 import {
   AISStreamFeed,
@@ -10,6 +12,7 @@ import {
   feedExpireSystem,
   feedRemoveSystem,
   feedUpsertSystem,
+  FRAME_KIND_KEYFRAME,
   FrameEncoder,
   lonLatToMeters,
   OpenSkyFeed,
@@ -18,23 +21,32 @@ import {
   type FeedEntity,
   type FeedSource,
 } from "@map3d/data-core";
-import { WsTransport, type ClientBbox } from "./WsTransport";
+import { WsTransport, type WsClientHandle, type ClientBbox } from "./WsTransport";
+import { TileService } from "./TileService";
 
 const PORT = Number(process.env.MAP3D_SERVER_PORT ?? 8787);
 const TICK_HZ = Number(process.env.MAP3D_TICK_HZ ?? 30);
 const SCENE_ORIGIN_LON = Number(process.env.MAP3D_ORIGIN_LON ?? -73.985);
 const SCENE_ORIGIN_LAT = Number(process.env.MAP3D_ORIGIN_LAT ?? 40.758);
-const FRAME_CAPACITY_BYTES = 1 << 20; // 1 MiB hard cap per frame
+const FRAME_CAPACITY_BYTES = 4 * 1024 * 1024; // 4 MiB per-client frame
 const ENTITY_CAP = 8192;
+const PMTILES_URL = process.env.MAP3D_PMTILES_URL ?? "https://demo-bucket.protomaps.com/v4.pmtiles";
+
+interface PerClient {
+  handle: WsClientHandle;
+  encoder: FrameEncoder;
+  origin: { lon: number; lat: number };
+}
 
 interface ServerState {
   world: ReturnType<typeof createMap3dWorld>;
   worldState: WorldState;
-  encoder: FrameEncoder;
   transport: WsTransport;
+  tileService: TileService;
   sources: FeedSource[];
   tickSeq: number;
   lastTickMs: number;
+  perClient: Map<string, PerClient>;
 }
 
 function start(): ServerState {
@@ -45,8 +57,14 @@ function start(): ServerState {
     seed: 0xc0ffee,
   });
   const worldState = new WorldState(world);
-  const encoder = new FrameEncoder(FRAME_CAPACITY_BYTES);
   const transport = new WsTransport({ port: PORT });
+  const tileService = new TileService({
+    pmtilesUrl: PMTILES_URL,
+    schema: "protomaps-v4",
+    baseZoom: 15,
+    ringRadius: 2,
+    maxBatchesPerTick: 4,
+  });
 
   const opensky = new OpenSkyFeed();
   const aisKey = process.env.AISSTREAM_KEY ?? null;
@@ -60,7 +78,6 @@ function start(): ServerState {
       else feedRemoveSystem(world, ev.id);
     });
   }
-  // Seed initial bboxes around the configured origin so feeds start polling.
   const aircraftBbox = bboxAround(SCENE_ORIGIN_LAT, SCENE_ORIGIN_LON, 200);
   const vesselBbox = bboxAround(SCENE_ORIGIN_LAT, SCENE_ORIGIN_LON, 80);
   for (const src of sources) {
@@ -71,18 +88,36 @@ function start(): ServerState {
   const state: ServerState = {
     world,
     worldState,
-    encoder,
     transport,
+    tileService,
     sources,
     tickSeq: 0,
     lastTickMs: Date.now(),
+    perClient: new Map(),
   };
 
   transport.onClient((c) => {
-    // Send a keyframe immediately so the client renders something.
+    const handle = c as WsClientHandle;
+    const pc: PerClient = {
+      handle,
+      encoder: new FrameEncoder(FRAME_CAPACITY_BYTES),
+      origin: { lon: SCENE_ORIGIN_LON, lat: SCENE_ORIGIN_LAT },
+    };
+    state.perClient.set(handle.id, pc);
+    tileService.registerClient(handle.id, {
+      origin: { lon: SCENE_ORIGIN_LON, lat: SCENE_ORIGIN_LAT },
+    });
+    handle.onBbox((b: ClientBbox) => onClientBbox(state, handle.id, b));
+    handle.onClose(() => {
+      state.perClient.delete(handle.id);
+      tileService.unregisterClient(handle.id);
+    });
+    // Send the initial keyframe immediately so the client renders something
+    // even before the first tick.
     try {
-      const frame = state.worldState.produceKeyframe(state.encoder, state.tickSeq, Date.now());
-      c.send(frame);
+      const frame = worldState.produceKeyframe(pc.encoder, state.tickSeq, Date.now());
+      // Take ownership before we reuse the encoder buffer.
+      handle.send(new Uint8Array(frame));
     } catch (err) {
       console.error("initial keyframe failed", err);
     }
@@ -92,7 +127,7 @@ function start(): ServerState {
   setInterval(() => tick(state), intervalMs);
 
   console.log(
-    `[data-server] tick=${TICK_HZ}Hz origin=${SCENE_ORIGIN_LAT},${SCENE_ORIGIN_LON} ws://0.0.0.0:${PORT}`,
+    `[data-server] tick=${TICK_HZ}Hz origin=${SCENE_ORIGIN_LAT},${SCENE_ORIGIN_LON} pmtiles=${PMTILES_URL} ws://0.0.0.0:${PORT}`,
   );
   return state;
 }
@@ -104,15 +139,54 @@ function tick(state: ServerState): void {
   simUpdateSystem(state.world, dt);
   feedExpireSystem(state.world, now);
   state.worldState.setEnv(computeSun(hourOfDay(now)));
-  let frame: Uint8Array;
-  try {
-    frame = state.worldState.produceKeyframe(state.encoder, state.tickSeq++, now);
-  } catch (err) {
-    console.error("encode failed", err);
-    return;
+  const seq = state.tickSeq++;
+
+  // Frame A: world keyframe — same shared content for every client, but we
+  // emit one per client so per-client FrameEncoders remain isolated (and so
+  // any future per-client filtering of agents/feeds slots in naturally).
+  for (const [clientId, pc] of state.perClient) {
+    try {
+      const frame = state.worldState.produceKeyframe(pc.encoder, seq, now);
+      pc.handle.send(new Uint8Array(frame));
+    } catch (err) {
+      console.error("world encode failed", { clientId, err });
+    }
   }
-  state.transport.publish(frame);
+
+  // Frame B: per-client tile streaming — only sent if the tile service
+  // actually emitted at least one section for *that* client this tick.
+  for (const [, pc] of state.perClient) {
+    try {
+      pc.encoder.beginFrame(FRAME_KIND_KEYFRAME, seq, now);
+    } catch (err) {
+      console.error("tile frame open failed", err);
+    }
+  }
+  const wrote = state.tileService.tickAndEncode((id) => {
+    const pc = state.perClient.get(id);
+    if (!pc) throw new Error(`unknown client ${id}`);
+    return pc.encoder;
+  });
+  for (const [clientId, pc] of state.perClient) {
+    try {
+      const frame = pc.encoder.endFrame();
+      if (wrote.has(clientId)) pc.handle.send(new Uint8Array(frame));
+    } catch (err) {
+      console.error("tile frame close failed", { clientId, err });
+    }
+  }
+
   feedCommitRemovalsSystem(state.world);
+}
+
+function onClientBbox(state: ServerState, clientId: string, b: ClientBbox): void {
+  if (!state.tileService.hasClient(clientId)) return;
+  const centerLon = (b.minLon + b.maxLon) * 0.5;
+  const centerLat = (b.minLat + b.maxLat) * 0.5;
+  // Clamp to valid mercator range — guards against malformed client traffic.
+  if (centerLat < -85 || centerLat > 85) return;
+  if (centerLon < -180 || centerLon > 180) return;
+  state.tileService.updateClientOrigin(clientId, centerLon, centerLat);
 }
 
 function handleFeedUpdate(
@@ -120,9 +194,6 @@ function handleFeedUpdate(
   e: FeedEntity,
   sceneOrigin: { x: number; y: number },
 ): void {
-  // The data-core feedUpsertSystem projects into scene metres; pass the
-  // origin so we get matching coords to the simulated agents.
-  // Aircraft altitude compression mirrors the existing renderer (12 km → 3 km).
   const altScale = e.kind === "aircraft" ? 3000 / 12000 : 1.0;
   feedUpsertSystem(world, e, { sceneOrigin, altitudeScale: altScale });
 }

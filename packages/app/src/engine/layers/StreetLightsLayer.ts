@@ -9,10 +9,17 @@
 import * as THREE from "three";
 import { MeshStandardNodeMaterial } from "three/webgpu";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { assert, assertFinite, assertU32, checkLoopBound } from "@map3d/data-core";
+import {
+  assert,
+  assertFinite,
+  assertU32,
+  checkLoopBound,
+  RoadClass,
+  type LayerGeometry,
+  type LayerName,
+  type ParsedTile,
+} from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
-import { RoadClass } from "../../cache/classes";
 import {
   assertLayerGeometry,
   assertOrigin,

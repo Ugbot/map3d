@@ -29,8 +29,8 @@ export interface ClientBbox {
 
 export class WsTransport implements Transport {
   private server: WebSocketServer;
-  private clients: Map<string, WsClientHandle> = new Map();
-  private onClientCb: ((c: ClientHandle) => void) | null = null;
+  private clientMap: Map<string, WsClientHandle> = new Map();
+  private onClientCb: ((c: WsClientHandle) => void) | null = null;
 
   constructor(opts: WsTransportOptions) {
     this.server = new WebSocketServer({ port: opts.port, host: opts.host });
@@ -40,34 +40,40 @@ export class WsTransport implements Transport {
   publish(frame: Uint8Array): void {
     // Defensive copy in case the encoder reuses its buffer between frames.
     const owned = new Uint8Array(frame);
-    for (const c of this.clients.values()) c.send(owned);
+    for (const c of this.clientMap.values()) c.send(owned);
+  }
+
+  /** Iterate currently-connected client handles (for per-client encoding). */
+  clients(): Iterable<WsClientHandle> {
+    return this.clientMap.values();
   }
 
   onClient(cb: (c: ClientHandle) => void): void {
-    this.onClientCb = cb;
+    this.onClientCb = cb as (c: WsClientHandle) => void;
   }
 
   close(): void {
-    for (const c of this.clients.values()) c.close();
+    for (const c of this.clientMap.values()) c.close();
     this.server.close();
   }
 
   private acceptClient(ws: WebSocket): void {
     const handle = new WsClientHandle(ws);
-    this.clients.set(handle.id, handle);
+    this.clientMap.set(handle.id, handle);
     ws.on("close", () => {
-      this.clients.delete(handle.id);
+      this.clientMap.delete(handle.id);
       handle.fireClose();
     });
     if (this.onClientCb) this.onClientCb(handle);
   }
 }
 
-class WsClientHandle implements ClientHandle {
+export class WsClientHandle implements ClientHandle {
   readonly id: string;
   private ws: WebSocket;
   private msgCb: ((m: Uint8Array) => void) | null = null;
   private closeCb: (() => void) | null = null;
+  private bboxCb: ((b: ClientBbox) => void) | null = null;
   bbox: ClientBbox | null = null;
 
   constructor(ws: WebSocket) {
@@ -101,6 +107,11 @@ class WsClientHandle implements ClientHandle {
     this.closeCb = cb;
   }
 
+  /** Fires whenever a SECTION_BBOX is decoded from inbound traffic. */
+  onBbox(cb: (b: ClientBbox) => void): void {
+    this.bboxCb = cb;
+  }
+
   close(): void {
     try {
       this.ws.close();
@@ -129,6 +140,7 @@ class WsClientHandle implements ClientHandle {
       } else if (type === SECTION_BBOX) {
         try {
           this.bbox = readBboxSection(payload);
+          if (this.bboxCb) this.bboxCb(this.bbox);
         } catch {
           // bad section — ignore
         }

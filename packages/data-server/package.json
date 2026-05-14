@@ -6,15 +6,20 @@
   "main": "./src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@map3d/data-core": "workspace:*",
+    "pmtiles": "^4.4.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/ws": "^8.5.13",
     "@types/node": "^22.10.0",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "vitest": "^4.1.6",
+    "earcut": "^3.0.2",
+    "@types/earcut": "^3.0.0"
   }
 }

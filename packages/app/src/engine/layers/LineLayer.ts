@@ -3,9 +3,16 @@
 // mapping for a procedural surface texture.
 
 import * as THREE from "three";
-import { assert, assertFinite, assertU32, checkLoopBound } from "@map3d/data-core";
+import {
+  assert,
+  assertFinite,
+  assertU32,
+  checkLoopBound,
+  type LayerGeometry,
+  type LayerName,
+  type ParsedTile,
+} from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { ribbonGeometry, assertOrigin, MAX_FEATURES_PER_TILE } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
 

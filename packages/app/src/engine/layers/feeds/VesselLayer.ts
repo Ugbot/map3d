@@ -1,8 +1,7 @@
 import * as THREE from "three";
 import { MeshStandardNodeMaterial } from "three/webgpu";
 import { FeedLayerBase } from "./FeedLayerBase";
-import { vesselTypeColor } from "../../../cache/classes";
-import { KIND_FEED_VESSEL } from "@map3d/data-core";
+import { vesselTypeColor, KIND_FEED_VESSEL } from "@map3d/data-core";
 
 function vesselGeometry(): THREE.BufferGeometry {
   const hull = new THREE.BoxGeometry(14, 6, 56);
