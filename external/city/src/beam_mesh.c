@@ -212,21 +212,6 @@ static void BeamMeshOnRemove(ecs_iter_t *it) {
     }
 }
 
-/* Render system — placeholder.
- *
- * Drawing BeamMesh entities correctly requires hooking into the sokol
- * module's `sokol_run_scene_pass` so we participate in the same offscreen
- * framebuffer (depth pre-pass, HDR target, fog post-pass, etc.). That
- * integration lives in deps/flecs_systems_sokol.c and is the responsibility
- * of the sokol-module patch in this same change set. The system below is
- * kept as an explicit registration hook so external callers can observe its
- * existence; the actual sg_draw calls happen inside the scene-pass extension
- * registered by FlecsSokolBeamMeshImport. */
-static void BeamMeshRender(ecs_iter_t *it) {
-    (void)it;
-    /* Intentionally empty: the scene-pass extension drives draws. */
-}
-
 void FlecsSokolBeamMeshImport(ecs_world_t *world) {
     ecs_assert(world != NULL, ECS_INVALID_PARAMETER, NULL);
 
@@ -237,19 +222,13 @@ void FlecsSokolBeamMeshImport(ecs_world_t *world) {
     /* Fire beam_mesh_destroy whenever a BeamMesh component is removed. This
      * is the only path through which sokol buffers are freed — even tile
      * release works by ecs_delete'ing the entity, which triggers on_remove
-     * for every component including BeamMesh. */
+     * for every component including BeamMesh.
+     *
+     * No render system is registered here: drawing happens inside
+     * sokol_run_scene_pass (deps/flecs_systems_sokol.c) so BeamMesh
+     * geometry participates in the same offscreen HDR target, depth buffer
+     * and post-processing chain as the box geometry. */
     ecs_set_hooks(world, BeamMesh, {
         .on_remove = BeamMeshOnRemove
-    });
-
-    /* Register a phase system in EcsOnStore (same phase the sokol module
-     * uses for SokolRender). The render system itself is a no-op; the actual
-     * drawing is dispatched from inside the sokol scene-pass extension. */
-    ecs_system(world, {
-        .entity = ecs_entity(world, {
-            .name = "BeamMeshRender",
-            .add = (ecs_id_t[]){ ecs_dependson(EcsOnStore), EcsOnStore, 0 }
-        }),
-        .callback = BeamMeshRender
     });
 }

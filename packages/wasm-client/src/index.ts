@@ -17,14 +17,24 @@ import { WsClient, type Bbox, type WsState } from "./WsClient";
 import type { EmscriptenModule } from "./types";
 
 const CITY_JS_URL = "/flecs/city.js";
-// Default bbox: a generous box around the data-server's NYC origin
-// (packages/data-server/src/index.ts uses SCENE_ORIGIN_LAT/LON near NYC).
-const DEFAULT_BBOX: Bbox = {
-  minLat: 40,
-  minLon: -74.5,
-  maxLat: 41.5,
-  maxLon: -73.5,
-};
+
+// Tile-ring half-extent in latitude degrees at the default base zoom (~15).
+// One MVT tile at z=15 spans roughly 1.2 km. A 0.04° box (~4.5 km on each
+// side) gives the server enough centre to pick the right ring centre.
+const BBOX_HALF_DEG = 0.04;
+
+function bboxAround(lat: number, lon: number): Bbox {
+  return {
+    minLat: Math.max(-85, lat - BBOX_HALF_DEG),
+    maxLat: Math.min(85, lat + BBOX_HALF_DEG),
+    minLon: Math.max(-180, lon - BBOX_HALF_DEG),
+    maxLon: Math.min(180, lon + BBOX_HALF_DEG),
+  };
+}
+
+const DEFAULT_LAT = 24.4539;
+const DEFAULT_LON = 54.3773;
+const DEFAULT_BBOX: Bbox = bboxAround(DEFAULT_LAT, DEFAULT_LON);
 
 function buildWsUrl(): string {
   // Use same-origin so Vite's /ws proxy hands off to the data-server in dev.
@@ -152,8 +162,48 @@ async function main(): Promise<void> {
   ws.setBbox(DEFAULT_BBOX);
   ws.start();
 
+  wireOriginPanel(ws, bridge);
+
   // Expose for ad-hoc poking in devtools. Not a stable API.
   (window as any).__map3d = { ws, bridge, setBbox: (b: Bbox) => ws.setBbox(b) };
+}
+
+/** Hook up the lat/lon panel: on submit (or preset click) compute a fresh
+ *  bbox, wipe the bridge's existing tiles so the previous map doesn't ghost
+ *  during the swap, and send the new bbox to the server. */
+function wireOriginPanel(ws: WsClient, bridge: FlecsBridge | null): void {
+  const form = document.getElementById("origin-panel") as HTMLFormElement | null;
+  const latIn = document.getElementById("origin-lat") as HTMLInputElement | null;
+  const lonIn = document.getElementById("origin-lon") as HTMLInputElement | null;
+  const info = document.getElementById("origin-info") as HTMLElement | null;
+  if (form == null || latIn == null || lonIn == null) return;
+
+  const apply = (lat: number, lon: number, name?: string): void => {
+    if (!Number.isFinite(lat) || lat < -85 || lat > 85) return;
+    if (!Number.isFinite(lon) || lon < -180 || lon > 180) return;
+    latIn.value = lat.toFixed(4);
+    lonIn.value = lon.toFixed(4);
+    if (info != null) info.textContent = name ?? `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+    bridge?.releaseAllTiles();
+    ws.setBbox(bboxAround(lat, lon));
+  };
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    apply(parseFloat(latIn.value), parseFloat(lonIn.value));
+  });
+
+  const presets = document.getElementById("origin-presets");
+  if (presets != null) {
+    presets.addEventListener("click", (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLButtonElement)) return;
+      const lat = parseFloat(t.getAttribute("data-lat") ?? "");
+      const lon = parseFloat(t.getAttribute("data-lon") ?? "");
+      const name = t.getAttribute("data-name") ?? undefined;
+      apply(lat, lon, name);
+    });
+  }
 }
 
 main().catch((err) => {

@@ -8,6 +8,11 @@
 
 #define SOKOL_NO_ENTRY
 #include "flecs_systems_sokol.h"
+/* BeamMesh component is declared in the project src/ tree; the renderer needs
+ * its struct layout + ECS_COMPONENT_DECLARE to iterate mesh entities inside
+ * sokol_run_scene_pass. The header is sokol-free, so pulling it here doesn't
+ * leak sokol types out of this TU. */
+#include "../src/beam_mesh.h"
 
 #ifndef FLECS_SYSTEMS_SOKOL_PRIVATE_API
 #define FLECS_SYSTEMS_SOKOL_PRIVATE_API
@@ -31610,6 +31615,233 @@ void scene_draw_instances(
     sg_draw(0, geometry->index_count, buffers->instance_count);
 }
 
+/* ---- BeamMesh draw integration ------------------------------------------
+ *
+ * Renders arbitrary triangulated meshes streamed in by the bridge. Each
+ * BeamMesh entity owns its own vbuf+ibuf (interleaved pos.xyz + normal.xyz,
+ * 24 bytes/vert); we issue one draw call per entity, picking up the same
+ * offscreen HDR target the box geometry writes into so fog / atmosphere
+ * tonemap pick the meshes up automatically.
+ *
+ * Pipeline is created lazily on first draw — sg_setup must have run, which
+ * we gate on beam_sokol_is_ready(). All resources are leaked at process
+ * exit (we never call sg_shutdown ourselves). */
+#define BEAM_MESH_DRAW_CAP 8192
+
+typedef struct beam_mesh_vs_uniforms_t {
+    mat4 u_mvp;
+} beam_mesh_vs_uniforms_t;
+
+typedef struct beam_mesh_fs_uniforms_t {
+    vec3 u_sun_dir;     float _pad0;
+    vec3 u_sun_col;     float _pad1;
+    vec3 u_ambient;     float _pad2;
+    vec3 u_base_color;  float _pad3;
+} beam_mesh_fs_uniforms_t;
+
+static sg_pipeline beam_pip_solid = {0};
+static bool beam_pip_solid_inited = false;
+
+static void beam_mesh_init_pipeline(void) {
+    if (beam_pip_solid_inited) return;
+
+    /* GLSL ES 300 vertex shader: interleaved pos.xyz + normal.xyz, single
+     * MVP uniform. Position is in mesh-local space (BeamMesh.origin already
+     * baked into MVP by the caller). */
+    const char *vs_src =
+        SOKOL_SHADER_HEADER
+        "uniform mat4 u_mvp;\n"
+        "layout(location=0) in vec3 v_position;\n"
+        "layout(location=1) in vec3 v_normal;\n"
+        "out vec3 f_normal;\n"
+        "void main() {\n"
+        "  f_normal = v_normal;\n"
+        "  gl_Position = u_mvp * vec4(v_position, 1.0);\n"
+        "}\n";
+
+    /* Lambert + hemisphere ambient. No fog: the post-pass operates on the
+     * HDR colour buffer and applies tonemap globally, so meshes inherit the
+     * scene's overall look without an explicit per-pixel fog term here. */
+    const char *fs_src =
+        SOKOL_SHADER_HEADER
+        "uniform vec3 u_sun_dir;\n"
+        "uniform vec3 u_sun_col;\n"
+        "uniform vec3 u_ambient;\n"
+        "uniform vec3 u_base_color;\n"
+        "in vec3 f_normal;\n"
+        "out vec4 frag_color;\n"
+        "void main() {\n"
+        "  vec3 n = normalize(f_normal);\n"
+        "  float ndl = max(dot(n, normalize(u_sun_dir)), 0.0);\n"
+        "  vec3 lit = u_base_color * (u_ambient + u_sun_col * ndl);\n"
+        "  frag_color = vec4(lit, 1.0);\n"
+        "}\n";
+
+    sg_shader shd = sg_make_shader(&(sg_shader_desc){
+        .vs.source = vs_src,
+        .vs.uniform_blocks[0] = {
+            .size = sizeof(beam_mesh_vs_uniforms_t),
+            .uniforms = {
+                [0] = { .name="u_mvp", .type=SG_UNIFORMTYPE_MAT4 }
+            }
+        },
+        .fs.source = fs_src,
+        .fs.uniform_blocks[0] = {
+            .size = sizeof(beam_mesh_fs_uniforms_t),
+            .uniforms = {
+                [0] = { .name="u_sun_dir",    .type=SG_UNIFORMTYPE_FLOAT3 },
+                [1] = { .name="u_sun_col",    .type=SG_UNIFORMTYPE_FLOAT3 },
+                [2] = { .name="u_ambient",    .type=SG_UNIFORMTYPE_FLOAT3 },
+                [3] = { .name="u_base_color", .type=SG_UNIFORMTYPE_FLOAT3 }
+            }
+        }
+    });
+
+    beam_pip_solid = sg_make_pipeline(&(sg_pipeline_desc){
+        .shader = shd,
+        .index_type = SG_INDEXTYPE_UINT32,
+        .layout = {
+            .buffers[0] = { .stride = 24 /* 6 * f32 */ },
+            .attrs = {
+                [0] = { .buffer_index=0, .offset=0,  .format=SG_VERTEXFORMAT_FLOAT3 },
+                [1] = { .buffer_index=0, .offset=12, .format=SG_VERTEXFORMAT_FLOAT3 }
+            }
+        },
+        .depth = {
+            .pixel_format = SG_PIXELFORMAT_DEPTH,
+            .compare = SG_COMPAREFUNC_LESS_EQUAL,
+            .write_enabled = true
+        },
+        .colors = {{ .pixel_format = SG_PIXELFORMAT_RGBA16F }},
+        .cull_mode = SG_CULLMODE_BACK,
+        .sample_count = 1,
+        .label = "beam_pip_solid"
+    });
+
+    beam_pip_solid_inited = true;
+}
+
+/* Cached ecs_query so we don't pay for query construction every frame. */
+static ecs_query_t *beam_mesh_draw_query = NULL;
+
+static void sokol_draw_beam_meshes(
+    ecs_world_t *world,
+    mat4 view_proj,
+    vec3 sun_dir,
+    vec3 sun_col,
+    vec3 ambient)
+{
+    if (!beam_sokol_is_ready()) return;
+    beam_mesh_init_pipeline();
+
+    if (!beam_mesh_draw_query) {
+        beam_mesh_draw_query = ecs_query(world, {
+            .terms = {
+                { .id = ecs_id(BeamMesh) },
+                { .id = ecs_id(EcsPosition3) }
+            }
+        });
+        if (!beam_mesh_draw_query) return;
+    }
+
+    sg_apply_pipeline(beam_pip_solid);
+
+    beam_mesh_fs_uniforms_t fs_u;
+    glm_vec3_copy(sun_dir, fs_u.u_sun_dir);     fs_u._pad0 = 0;
+    glm_vec3_copy(sun_col, fs_u.u_sun_col);     fs_u._pad1 = 0;
+    glm_vec3_copy(ambient, fs_u.u_ambient);     fs_u._pad2 = 0;
+
+    uint32_t drawn = 0;
+    ecs_iter_t qit = ecs_query_iter(world, beam_mesh_draw_query);
+    while (ecs_query_next(&qit)) {
+        BeamMesh *bm = ecs_field(&qit, BeamMesh, 0);
+        EcsPosition3 *p = ecs_field(&qit, EcsPosition3, 1);
+        for (int i = 0; i < qit.count; i++) {
+            if (!bm[i].vbuf || !bm[i].ibuf || !bm[i].index_count) continue;
+            ecs_assert(drawn < BEAM_MESH_DRAW_CAP, ECS_OUT_OF_RANGE,
+                "BeamMesh draw cap exceeded");
+            drawn++;
+
+            /* MVP = view_proj * translate(origin + position). The mesh
+             * positions are already local-relative to BeamMesh.origin; the
+             * EcsPosition3 lets the bridge offset whole meshes without
+             * re-uploading the buffer. */
+            mat4 model;
+            glm_mat4_identity(model);
+            model[3][0] = bm[i].origin[0] + p[i].x;
+            model[3][1] = bm[i].origin[1] + p[i].y;
+            model[3][2] = bm[i].origin[2] + p[i].z;
+
+            beam_mesh_vs_uniforms_t vs_u;
+            glm_mat4_mul(view_proj, model, vs_u.u_mvp);
+
+            glm_vec3_copy(bm[i].color, fs_u.u_base_color); fs_u._pad3 = 0;
+
+            sg_apply_uniforms(SG_SHADERSTAGE_VS, 0,
+                &(sg_range){ &vs_u, sizeof(vs_u) });
+            sg_apply_uniforms(SG_SHADERSTAGE_FS, 0,
+                &(sg_range){ &fs_u, sizeof(fs_u) });
+
+            sg_apply_bindings(&(sg_bindings){
+                .vertex_buffers[0] = (sg_buffer){ .id = bm[i].vbuf },
+                .index_buffer     = (sg_buffer){ .id = bm[i].ibuf }
+            });
+            sg_draw(0, (int)bm[i].index_count, 1);
+        }
+    }
+}
+
+/* Resolve the active BeamEnv singleton (registered by FlecsCityBridgeImport)
+ * via name lookup so this TU doesn't need to link against bridge.c's static
+ * component-id. Falls back to a daylight default if the bridge hasn't been
+ * imported or beam_set_env() hasn't been called yet. */
+static void beam_mesh_resolve_env(
+    ecs_world_t *world,
+    vec3 sun_dir_out,
+    vec3 sun_col_out,
+    vec3 ambient_out)
+{
+    /* Default: sun roughly south-up, neutral white, mild grey ambient. */
+    vec3 def_dir = { 0.3f, 0.9f, 0.2f };
+    glm_vec3_normalize(def_dir);
+    glm_vec3_copy(def_dir, sun_dir_out);
+    glm_vec3_copy((vec3){ 1.0f, 1.0f, 1.0f }, sun_col_out);
+    glm_vec3_copy((vec3){ 0.25f, 0.25f, 0.28f }, ambient_out);
+
+    ecs_entity_t env_comp = ecs_lookup(world, "bridge.BeamEnv");
+    if (!env_comp) return;
+    const void *env_ptr = ecs_get_id(world, env_comp, env_comp);
+    if (!env_ptr) return;
+
+    /* Mirror of bridge.c's anonymous BeamEnv struct. Order MUST match. */
+    struct beam_env_view {
+        float sun_altitude;
+        float sun_azimuth;
+        uint32_t sun_color_rgb;
+        uint32_t ambient_sky_rgb;
+        uint32_t ambient_ground_rgb;
+    };
+    const struct beam_env_view *env = (const struct beam_env_view*)env_ptr;
+
+    float ca = cosf(env->sun_altitude);
+    float sa = sinf(env->sun_altitude);
+    float cz = cosf(env->sun_azimuth);
+    float sz = sinf(env->sun_azimuth);
+    sun_dir_out[0] = ca * sz;
+    sun_dir_out[1] = sa;
+    sun_dir_out[2] = ca * cz;
+    glm_vec3_normalize(sun_dir_out);
+
+    const float inv = 1.0f / 255.0f;
+    sun_col_out[0] = (float)((env->sun_color_rgb >> 16) & 0xFFu) * inv;
+    sun_col_out[1] = (float)((env->sun_color_rgb >>  8) & 0xFFu) * inv;
+    sun_col_out[2] = (float)((env->sun_color_rgb      ) & 0xFFu) * inv;
+
+    ambient_out[0] = (float)((env->ambient_sky_rgb >> 16) & 0xFFu) * inv;
+    ambient_out[1] = (float)((env->ambient_sky_rgb >>  8) & 0xFFu) * inv;
+    ambient_out[2] = (float)((env->ambient_sky_rgb      ) & 0xFFu) * inv;
+}
+
 void sokol_run_scene_pass(
     sokol_offscreen_pass_t *pass,
     sokol_render_state_t *state)
@@ -31672,6 +31904,18 @@ void sokol_run_scene_pass(
             scene_draw_instances(&geometry[b], &geometry[b].solid, state->shadow_map);
             scene_draw_instances(&geometry[b], &geometry[b].emissive, state->shadow_map);
         }
+    }
+
+    /* BeamMesh primitive: arbitrary triangulated meshes streamed from the
+     * bridge (roads, coastlines, water polygons). Drawn after the box
+     * geometry so they share the offscreen HDR target and depth buffer, but
+     * before the atmosphere/sun pass which paints the sky behind everything
+     * via gl_Position.z = 1.0. */
+    {
+        vec3 bm_sun_dir, bm_sun_col, bm_ambient;
+        beam_mesh_resolve_env(state->world, bm_sun_dir, bm_sun_col, bm_ambient);
+        sokol_draw_beam_meshes(state->world,
+            state->uniforms.mat_vp, bm_sun_dir, bm_sun_col, bm_ambient);
     }
 
     /* Step 1: render atmosphere background */

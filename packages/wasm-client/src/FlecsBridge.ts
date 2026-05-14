@@ -35,6 +35,13 @@ import {
   SECTION_AGENTS,
   SECTION_ENV,
   SECTION_FEEDS,
+  SECTION_TILE_BEGIN,
+  SECTION_TILE_BUILDINGS,
+  SECTION_TILE_END,
+  SECTION_TILE_LANTERNS,
+  SECTION_TILE_MESH,
+  SECTION_TILE_PROPS,
+  SECTION_TILE_RELEASE,
   assert,
   assertFinite,
   assertInRange,
@@ -42,6 +49,12 @@ import {
   readAgentSection,
   readEnvSection,
   readFeedSection,
+  readTileBegin,
+  readTileBuildings,
+  readTileLanterns,
+  readTileMesh,
+  readTileProps,
+  readTileRelease,
 } from "@map3d/data-core";
 import type { EmscriptenModule } from "./types";
 import { fnv1a32 } from "./HashId";
@@ -82,6 +95,40 @@ type V_env = (
   ground: number,
 ) => void;
 type R_u32 = () => number;
+type V_tile_coord = (z: number, x: number, y: number) => void;
+type V_building = (
+  remoteId: number,
+  kind: number,
+  cx: number,
+  cy: number,
+  cz: number,
+  sx: number,
+  sy: number,
+  sz: number,
+  heading: number,
+  color: number,
+) => void;
+type V_mesh_upsert = (
+  remoteId: number,
+  layerKind: number,
+  positionsPtr: number,
+  nFloats: number,
+  indicesPtr: number,
+  nIndices: number,
+  color: number,
+  originX: number,
+  originY: number,
+  originZ: number,
+) => void;
+type V_lantern = (remoteId: number, x: number, y: number, z: number) => void;
+type V_prop = (
+  remoteId: number,
+  propKind: number,
+  x: number,
+  y: number,
+  z: number,
+  heading: number,
+) => void;
 
 export class FlecsBridge {
   private mod: EmscriptenModule | null = null;
@@ -99,6 +146,27 @@ export class FlecsBridge {
   private _setEnv!: V_env;
   private _clearAll!: V_void;
   private _liveCount!: R_u32;
+
+  // Static tile geometry exports.
+  private _tileBegin!: V_tile_coord;
+  private _tileEnd!: V_void;
+  private _tileRelease!: V_tile_coord;
+  private _buildingUpsert!: V_building;
+  private _meshUpsert!: V_mesh_upsert;
+  private _meshRemove!: V_u32;
+  private _lanternUpsert!: V_lantern;
+  private _propUpsert!: V_prop;
+
+  // remote_id allocation. The server emits ids that are unique within a tile;
+  // we further partition by family so building/mesh/lantern/prop spaces don't
+  // collide on the bridge side.
+  private static readonly FAMILY_BUILDING_BASE = 0x20000000;
+  private static readonly FAMILY_MESH_BASE = 0x30000000;
+  private static readonly FAMILY_LANTERN_BASE = 0x40000000;
+  private static readonly FAMILY_PROP_BASE = 0x50000000;
+
+  // Track active tiles so a UI-initiated origin change can wipe everything.
+  private liveTiles: Set<string> = new Set();
 
   // Per-kind previous count for reaping trailing agents on a keyframe.
   private prevAgentCount = new Uint32Array(AGENT_KIND_COUNT);
@@ -161,9 +229,61 @@ export class FlecsBridge {
     this._clearAll = cw("beam_clear_all", null, []) as V_void;
     this._liveCount = cw("beam_live_count", "number", []) as R_u32;
 
+    this._tileBegin = cw("beam_tile_begin", null, [
+      "number",
+      "number",
+      "number",
+    ]) as V_tile_coord;
+    this._tileEnd = cw("beam_tile_end", null, []) as V_void;
+    this._tileRelease = cw("beam_tile_release", null, [
+      "number",
+      "number",
+      "number",
+    ]) as V_tile_coord;
+    this._buildingUpsert = cw("beam_building_upsert", null, [
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+    ]) as V_building;
+    this._meshUpsert = cw("beam_mesh_upsert", null, [
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+    ]) as V_mesh_upsert;
+    this._meshRemove = cw("beam_mesh_remove", null, ["number"]) as V_u32;
+    this._lanternUpsert = cw("beam_lantern_upsert", null, [
+      "number",
+      "number",
+      "number",
+      "number",
+    ]) as V_lantern;
+    this._propUpsert = cw("beam_prop_upsert", null, [
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+    ]) as V_prop;
+
     this._init();
     this.prevAgentCount.fill(0);
     this.liveFeedIds.clear();
+    this.liveTiles.clear();
   }
 
   beginFrame(tickSeq: number): void {
@@ -227,10 +347,92 @@ export class FlecsBridge {
     this._clearAll();
     this.prevAgentCount.fill(0);
     this.liveFeedIds.clear();
+    this.liveTiles.clear();
+  }
+
+  /** Release every tile the bridge currently holds. Called from the wasm-client
+   *  UI when the user changes the centre so the previous map clears before
+   *  the server's RELEASE frames arrive (avoids a brief overlap flash). */
+  releaseAllTiles(): void {
+    for (const key of this.liveTiles) {
+      const [z, x, y] = key.split("/").map((s) => parseInt(s, 10));
+      this._tileRelease(z, x, y);
+    }
+    this.liveTiles.clear();
   }
 
   liveCount(): number {
     return this._liveCount() >>> 0;
+  }
+
+  /** Synthetic remote-id helpers. The server's remote_id is only unique per
+   *  family per tile; we partition the bridge id space so building/mesh/
+   *  lantern/prop don't collide. */
+  static buildingRemoteId(serverId: number): number {
+    return (FlecsBridge.FAMILY_BUILDING_BASE | (serverId & 0x0fffffff)) >>> 0;
+  }
+  static meshRemoteId(serverId: number): number {
+    return (FlecsBridge.FAMILY_MESH_BASE | (serverId & 0x0fffffff)) >>> 0;
+  }
+  static lanternRemoteId(serverId: number): number {
+    return (FlecsBridge.FAMILY_LANTERN_BASE | (serverId & 0x0fffffff)) >>> 0;
+  }
+  static propRemoteId(serverId: number): number {
+    return (FlecsBridge.FAMILY_PROP_BASE | (serverId & 0x0fffffff)) >>> 0;
+  }
+
+  /** Copy a mesh's positions + indices into the WASM heap, hand the pointers
+   *  to beam_mesh_upsert, then free. The bridge copies into sokol buffers so
+   *  the heap memory is safe to release immediately after the call. */
+  private uploadMesh(rec: {
+    remoteId: number;
+    layerKind: number;
+    originX: number;
+    originY: number;
+    originZ: number;
+    color: number;
+    positions: Float32Array;
+    indices: Uint32Array;
+  }): void {
+    assert(this.mod != null, "uploadMesh: bridge not initialised");
+    const mod = this.mod;
+    const nFloats = rec.positions.length;
+    const nIndices = rec.indices.length;
+    if (nFloats === 0 || nIndices === 0) return;
+    assertU32(nFloats, "mesh nFloats");
+    assertU32(nIndices, "mesh nIndices");
+    const posBytes = nFloats * 4;
+    const idxBytes = nIndices * 4;
+    const posPtr = mod._malloc(posBytes);
+    if (posPtr === 0) {
+      console.error("[FlecsBridge] _malloc failed for mesh positions", { posBytes });
+      return;
+    }
+    const idxPtr = mod._malloc(idxBytes);
+    if (idxPtr === 0) {
+      mod._free(posPtr);
+      console.error("[FlecsBridge] _malloc failed for mesh indices", { idxBytes });
+      return;
+    }
+    try {
+      mod.HEAPF32.set(rec.positions, posPtr >>> 2);
+      mod.HEAPU32.set(rec.indices, idxPtr >>> 2);
+      this._meshUpsert(
+        FlecsBridge.meshRemoteId(rec.remoteId),
+        rec.layerKind & 0xff,
+        posPtr >>> 0,
+        nFloats >>> 0,
+        idxPtr >>> 0,
+        nIndices >>> 0,
+        rec.color >>> 0,
+        rec.originX,
+        rec.originY,
+        rec.originZ,
+      );
+    } finally {
+      mod._free(posPtr);
+      mod._free(idxPtr);
+    }
   }
 
   /** Compute the synthetic remote_id for an anonymous agent slot. */
@@ -324,6 +526,59 @@ export class FlecsBridge {
           e.ambientSky >>> 0,
           e.ambientGround >>> 0,
         );
+      } else if (type === SECTION_TILE_BEGIN) {
+        const k = readTileBegin(payload);
+        this._tileBegin(k.z, k.x, k.y);
+        this.liveTiles.add(`${k.z}/${k.x}/${k.y}`);
+      } else if (type === SECTION_TILE_END) {
+        this._tileEnd();
+      } else if (type === SECTION_TILE_RELEASE) {
+        const k = readTileRelease(payload);
+        this._tileRelease(k.z, k.x, k.y);
+        this.liveTiles.delete(`${k.z}/${k.x}/${k.y}`);
+      } else if (type === SECTION_TILE_BUILDINGS) {
+        const recs = readTileBuildings(payload);
+        for (let i = 0; i < recs.length; i++) {
+          const r = recs[i];
+          this._buildingUpsert(
+            FlecsBridge.buildingRemoteId(r.remoteId),
+            r.kind & 0xff,
+            r.cx,
+            r.cy,
+            r.cz,
+            r.sx,
+            r.sy,
+            r.sz,
+            r.heading,
+            r.color >>> 0,
+          );
+        }
+      } else if (type === SECTION_TILE_MESH) {
+        this.uploadMesh(readTileMesh(payload));
+      } else if (type === SECTION_TILE_LANTERNS) {
+        const recs = readTileLanterns(payload);
+        for (let i = 0; i < recs.length; i++) {
+          const r = recs[i];
+          this._lanternUpsert(
+            FlecsBridge.lanternRemoteId(r.remoteId),
+            r.x,
+            r.y,
+            r.z,
+          );
+        }
+      } else if (type === SECTION_TILE_PROPS) {
+        const recs = readTileProps(payload);
+        for (let i = 0; i < recs.length; i++) {
+          const r = recs[i];
+          this._propUpsert(
+            FlecsBridge.propRemoteId(r.remoteId),
+            r.propKind & 0xff,
+            r.x,
+            r.y,
+            r.z,
+            r.heading,
+          );
+        }
       }
       // Unknown sections are ignored — forward compatibility.
     });

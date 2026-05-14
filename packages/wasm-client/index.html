@@ -51,6 +51,67 @@
       #status[data-state="open"]       .dot { background: #4fbd6e; }
       #status[data-state="closed"]     .dot { background: #c46a3f; }
       #status[data-state="error"]      .dot { background: #d24a4a; }
+      #origin-panel {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        padding: 10px 12px;
+        background: rgba(15, 20, 28, 0.85);
+        border: 1px solid #2a3340;
+        border-radius: 6px;
+        font-size: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        z-index: 10;
+        color: #d6dbe2;
+      }
+      #origin-panel label {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 10px;
+        color: #8a98ad;
+      }
+      #origin-panel input {
+        background: #0a0d12;
+        border: 1px solid #2a3340;
+        color: #d6dbe2;
+        padding: 4px 6px;
+        border-radius: 4px;
+        width: 110px;
+        font-family: inherit;
+        font-size: 12px;
+      }
+      #origin-panel input:focus { outline: none; border-color: #4fbd6e; }
+      #origin-panel .row { display: flex; gap: 10px; }
+      #origin-panel button {
+        background: #1b2532;
+        border: 1px solid #2a3340;
+        color: #d6dbe2;
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-family: inherit;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        cursor: pointer;
+      }
+      #origin-panel button:hover { background: #243245; border-color: #4fbd6e; }
+      #origin-panel button:active { background: #0a0d12; }
+      #origin-panel .presets {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 2px;
+      }
+      #origin-panel .presets button {
+        padding: 3px 6px;
+        font-size: 10px;
+      }
     </style>
   </head>
   <body>
@@ -59,6 +120,23 @@
       <span class="dot"></span>
       <span id="status-text">connecting</span>
     </div>
+    <form id="origin-panel" autocomplete="off">
+      <div class="row">
+        <label>lat <input id="origin-lat" type="number" step="0.0001" value="24.4539" /></label>
+        <label>lon <input id="origin-lon" type="number" step="0.0001" value="54.3773" /></label>
+      </div>
+      <div class="row">
+        <button type="submit" id="origin-apply">apply</button>
+        <span id="origin-info" style="align-self:center;color:#8a98ad">Abu Dhabi</span>
+      </div>
+      <div class="presets" id="origin-presets">
+        <button type="button" data-lat="24.4539" data-lon="54.3773" data-name="Abu Dhabi">Abu Dhabi</button>
+        <button type="button" data-lat="51.5074" data-lon="-0.1278" data-name="London">London</button>
+        <button type="button" data-lat="40.7580" data-lon="-73.9855" data-name="NYC">NYC</button>
+        <button type="button" data-lat="35.6762" data-lon="139.6503" data-name="Tokyo">Tokyo</button>
+        <button type="button" data-lat="48.8566" data-lon="2.3522" data-name="Paris">Paris</button>
+      </div>
+    </form>
     <script type="module" src="/src/index.ts"></script>
   </body>
 </html>
