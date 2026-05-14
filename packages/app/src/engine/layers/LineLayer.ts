@@ -3,9 +3,10 @@
 // mapping for a procedural surface texture.
 
 import * as THREE from "three";
+import { assert, assertFinite, assertU32, checkLoopBound } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
-import { ribbonGeometry } from "./util";
+import { ribbonGeometry, assertOrigin, MAX_FEATURES_PER_TILE } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
 
 export interface LineLayerOptions {
@@ -63,7 +64,12 @@ export class LineLayer implements Layer {
   }
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
+    assertU32(tile.z, "LineLayer.load: tile.z");
+    assertU32(tile.x, "LineLayer.load: tile.x");
+    assertU32(tile.y, "LineLayer.load: tile.y");
+    assertOrigin(ctx.sceneOrigin, "LineLayer.load");
     const thickness = this.opts.thickness ?? 1.0;
+    assertFinite(thickness, "LineLayer.load: thickness");
     let geometry: THREE.BufferGeometry;
     let featureRanges: Uint32Array;
     let featureIds: Uint32Array;
@@ -72,6 +78,15 @@ export class LineLayer implements Layer {
     // ribbon-extrude cost off the main thread.
     const baked = tile.bakedLines?.[this.name];
     if (baked && baked.featureIds.length > 0) {
+      assert(baked.positions.length % 3 === 0, "LineLayer.load: baked.positions not multiple of 3");
+      assert(
+        baked.featureRanges.length === baked.featureIds.length + 1,
+        "LineLayer.load: baked.featureRanges length mismatch",
+      );
+      assert(
+        baked.featureIds.length <= MAX_FEATURES_PER_TILE,
+        `LineLayer.load: baked featureIds ${baked.featureIds.length} exceeds cap`,
+      );
       geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.BufferAttribute(baked.positions, 3));
       geometry.setIndex(new THREE.BufferAttribute(baked.indices, 1));
@@ -105,7 +120,10 @@ export class LineLayer implements Layer {
     this.root.add(mesh);
     const tileKey = `${tile.z}/${tile.x}/${tile.y}`;
     const globalIds = new Array<string>(featureIds.length);
-    for (let i = 0; i < featureIds.length; i++) globalIds[i] = `${tileKey}:${featureIds[i]}`;
+    for (let i = 0; i < featureIds.length; i++) {
+      checkLoopBound(i, MAX_FEATURES_PER_TILE, "LineLayer.load: globalIds");
+      globalIds[i] = `${tileKey}:${featureIds[i]}`;
+    }
     const h: LHandle = {
       mesh,
       featureRanges,
@@ -129,6 +147,8 @@ export class LineLayer implements Layer {
   }
 
   update(_t: number, sunAltitude: number, glow: number): void {
+    assertFinite(sunAltitude, "LineLayer.update: sunAltitude");
+    assertFinite(glow, "LineLayer.update: glow");
     const night = Math.max(0, -sunAltitude);
     const fromNight = this.glowAtNight ? night * 1.5 * glow : 0;
     this.material.emissiveIntensity = this.baseEmissive + this.constantGlow * glow + fromNight;

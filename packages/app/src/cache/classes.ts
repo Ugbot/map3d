@@ -1,6 +1,15 @@
 // Numeric class enums per layer. Workers tag each feature with a small int
 // instead of a string, so the renderer can branch/pick colour with O(1) lookups.
 
+import { assert, assertFinite, assertInRange } from "@map3d/data-core";
+
+// Public classifier contract: input is the raw tag string from the source
+// vector tile (potentially undefined). We assert the type invariant — bad
+// types here mean a parser bug, not user data.
+function assertTagInput(s: string | undefined, where: string): void {
+  assert(s === undefined || typeof s === "string", `${where}: tag not string|undefined`);
+}
+
 export const RoadClass = {
   unknown: 0,
   motorway: 1,
@@ -162,6 +171,7 @@ export const PoiColor: Record<number, number> = {
 
 // OpenMapTiles `poi.class` is a coarse string. Map to our bucket enum.
 export function classifyPoiOMT(cls: string | undefined): number {
+  assertTagInput(cls, "classifyPoiOMT");
   if (!cls) return PoiClass.unknown;
   const k = cls.toLowerCase();
   if (k === "bus" || k === "railway" || k === "aerialway" || k === "ferry_terminal" || k === "airport" || k === "harbor" || k === "park_ride") return PoiClass.transit;
@@ -194,6 +204,7 @@ export const WaterwayWidthM: Record<number, number> = {
   [WaterwayClass.unknown]: 4,
 };
 export function classifyWaterway(s: string | undefined): number {
+  assertTagInput(s, "classifyWaterway");
   if (!s) return WaterwayClass.unknown;
   const k = s.toLowerCase();
   if (k === "river") return WaterwayClass.river;
@@ -228,6 +239,7 @@ export const LandcoverColor: Record<number, number> = {
   [LandcoverClass.urban]: 0x5a5a5a,
 };
 export function classifyLandcover(cls: string | undefined): number {
+  assertTagInput(cls, "classifyLandcover");
   if (!cls) return LandcoverClass.unknown;
   const k = cls.toLowerCase();
   if (k === "grass") return LandcoverClass.grass;
@@ -245,6 +257,7 @@ export function classifyLandcover(cls: string | undefined): number {
 // Codes are loose buckets: 20s sailing/wing/HSC, 30s fishing, 40s HSC, 50s
 // special (tug/pilot/SAR), 60s passenger, 70s cargo, 80s tanker, 90s other.
 export function vesselTypeColor(type: number | undefined): number {
+  assert(type === undefined || Number.isFinite(type), "vesselTypeColor: type not finite");
   if (type === undefined) return 0xb8c4d4;
   if (type >= 30 && type <= 39) return 0x6bd16b; // fishing — green
   if (type >= 60 && type <= 69) return 0xffffff; // passenger — white
@@ -258,6 +271,8 @@ export function vesselTypeColor(type: number | undefined): number {
 // Pick a base earth-plate colour by latitude band so empty tiles never show
 // the void. Crude climate buckets — refine later if we add a real biome model.
 export function earthBaseColorForLat(latDeg: number): number {
+  assertFinite(latDeg, "earthBaseColorForLat: latDeg");
+  assertInRange(latDeg, -90, 90, "earthBaseColorForLat: latDeg range");
   const abs = Math.abs(latDeg);
   if (abs < 12) return 0x4a6b3a; // tropical green
   if (abs < 24) return 0xa78a5e; // sand
@@ -268,6 +283,7 @@ export function earthBaseColorForLat(latDeg: number): number {
 }
 
 export function classifyRoad(kind: string | undefined): number {
+  assertTagInput(kind, "classifyRoad");
   if (!kind) return RoadClass.unknown;
   // Protomaps `roads` layer uses `kind` like "highway" + `kind_detail` for the OSM tag.
   // We accept either.
@@ -285,6 +301,7 @@ export function classifyRoad(kind: string | undefined): number {
 }
 
 export function classifyRail(kind: string | undefined): number {
+  assertTagInput(kind, "classifyRail");
   if (!kind) return RailClass.unknown;
   const k = kind.toLowerCase();
   if (k === "rail") return RailClass.rail;
@@ -296,6 +313,7 @@ export function classifyRail(kind: string | undefined): number {
 }
 
 export function classifyPath(kind: string | undefined): number {
+  assertTagInput(kind, "classifyPath");
   if (!kind) return PathClass.unknown;
   const k = kind.toLowerCase();
   if (k === "footway") return PathClass.footway;
@@ -307,6 +325,7 @@ export function classifyPath(kind: string | undefined): number {
 }
 
 export function classifyLanduse(kind: string | undefined): number {
+  assertTagInput(kind, "classifyLanduse");
   if (!kind) return LanduseClass.unknown;
   const k = kind.toLowerCase();
   if (k === "park" || k === "national_park" || k === "nature_reserve") return LanduseClass.park;

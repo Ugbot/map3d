@@ -2,10 +2,17 @@
 // from the LandcoverColor palette by the feature's class.
 
 import * as THREE from "three";
+import { assert, assertU32, checkLoopBound } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { makeGlowMaterial } from "./glowMaterial";
 import { LandcoverColor } from "../../cache/classes";
+import {
+  assertLayerGeometry,
+  assertOrigin,
+  MAX_FEATURES_PER_TILE,
+  MAX_VERTICES_PER_TILE,
+} from "./util";
 
 interface Handle extends TileMeshHandle {
   mesh: THREE.Mesh;
@@ -33,10 +40,16 @@ export class LandcoverLayer implements Layer {
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
     if (g.kind !== "polygon" || !g.indices || g.featureIds.length === 0) return null;
+    assertU32(tile.z, "LandcoverLayer.load: tile.z");
+    assertU32(tile.x, "LandcoverLayer.load: tile.x");
+    assertU32(tile.y, "LandcoverLayer.load: tile.y");
+    assertOrigin(ctx.sceneOrigin, "LandcoverLayer.load");
+    assertLayerGeometry(g, "LandcoverLayer.load");
     const vertCount = g.positions.length / 2;
     const positions = new Float32Array(vertCount * 3);
     const colors = new Float32Array(vertCount * 3);
     for (let i = 0; i < vertCount; i++) {
+      checkLoopBound(i, MAX_VERTICES_PER_TILE, "LandcoverLayer.load: vert walk");
       positions[i * 3 + 0] = g.positions[i * 2] - ctx.sceneOrigin.x;
       positions[i * 3 + 1] = 0;
       positions[i * 3 + 2] = -(g.positions[i * 2 + 1] - ctx.sceneOrigin.y);
@@ -44,12 +57,18 @@ export class LandcoverLayer implements Layer {
     // Walk featureStart ranges and stamp the per-feature colour onto each of
     // the vertices that feature's triangles touch.
     const cTmp = new THREE.Color();
+    const indexCount = g.indices.length;
     for (let fi = 0; fi < g.featureIds.length; fi++) {
+      checkLoopBound(fi, MAX_FEATURES_PER_TILE, "LandcoverLayer.load: feature walk");
       const cls = g.featureClass[fi];
       const hex = LandcoverColor[cls] ?? LandcoverColor[0];
       cTmp.setHex(hex);
       const idxStart = g.featureStart[fi];
       const idxEnd = g.featureStart[fi + 1];
+      assert(
+        idxStart <= idxEnd && idxEnd <= indexCount,
+        `LandcoverLayer.load: bad featureStart range [${idxStart},${idxEnd}]`,
+      );
       for (let i = idxStart; i < idxEnd; i++) {
         const v = g.indices[i];
         colors[v * 3 + 0] = cTmp.r;

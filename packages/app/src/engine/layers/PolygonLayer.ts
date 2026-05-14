@@ -2,9 +2,10 @@
 // worker; we just lift to a small Y to avoid z-fighting with the ground plane.
 
 import * as THREE from "three";
+import { assertU32 } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
-import { flatPolygonGeometry } from "./util";
+import { flatPolygonGeometry, assertOrigin } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
 
 interface PolyOpts {
@@ -49,6 +50,10 @@ export class PolygonLayer implements Layer {
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
     if (g.featureIds.length === 0) return null;
+    assertU32(tile.z, "PolygonLayer.load: tile.z");
+    assertU32(tile.x, "PolygonLayer.load: tile.x");
+    assertU32(tile.y, "PolygonLayer.load: tile.y");
+    assertOrigin(ctx.sceneOrigin, "PolygonLayer.load");
     const geom = flatPolygonGeometry(g, ctx.sceneOrigin);
     if (!geom) return null;
     const mesh = new THREE.Mesh(geom, this.material);

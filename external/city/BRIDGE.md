@@ -12,9 +12,11 @@ to nothing).
 | `beam_init()` | Verify bridge is live. Call once after the WASM boots. |
 | `beam_begin_frame(tick_seq)` / `beam_end_frame()` | Wrap a batch of upserts. Defers ECS ops for the duration. |
 | `beam_agent_upsert(id, kind, x, y, z, heading)` | kind: 0=vehicle, 1=train, 2=pedestrian. Creates or updates. |
-| `beam_agent_remove(id)` | Delete an agent across all kinds. |
+| `beam_agent_remove(id)` | Delete an agent; probes all kinds. Prefer the kind-aware variant. |
+| `beam_agent_remove_kind(id, kind)` | Delete an agent with a known kind. O(1) map remove. |
 | `beam_feed_upsert(id, kind, x, y, z, heading)` | kind: 0=aircraft, 1=vessel. |
-| `beam_feed_remove(id)` | Delete a feed across all kinds. |
+| `beam_feed_remove(id)` | Delete a feed; probes all kinds. Prefer the kind-aware variant. |
+| `beam_feed_remove_kind(id, kind)` | Delete a feed with a known kind. O(1) map remove. |
 | `beam_set_env(...)` | Push sun/ambient hints into the `BeamEnv` singleton. |
 | `beam_clear_all()` | Delete every bridge-owned entity. Use on reconnect. |
 | `beam_live_count()` | Total resident bridge entities. |
@@ -55,14 +57,31 @@ The bridge uses two `ecs_map_t` (agents, feeds) keyed by
 inside `ecs_defer_begin/end`. No allocation happens in the per-call hot
 path beyond what the maps amortise.
 
+## Prefabs
+
+The bridge declares kind-specific prefabs that all `IsA Car`, overriding
+the body `Box` and `Rgb` so the visual differences read at city scale:
+
+| Kind | Prefab | Size (W×H×D) | Colour |
+|---|---|---|---|
+| agent 0 | `Car` (inherited) | as defined in `city.flecs` | blue-grey |
+| agent 1 | `BeamTrain` | 4 × 3.5 × 30 | grey |
+| agent 2 | `BeamPedestrian` | 0.6 × 1.8 × 0.6 | cyan |
+| feed 0 | `BeamAircraft` | 30 × 3 × 4 | white |
+| feed 1 | `BeamVessel` | 14 × 6 × 60 | dark blue |
+
+## Sun sync
+
+`FlecsCityBridgeImport` registers a single `EcsOnUpdate` system,
+`BridgeSunSync`, that on each tick reads the `BeamEnv` singleton and
+writes the named scene light entity (`light`, tagged `EcsSun` in
+`etc/assets/app.flecs`). Altitude/azimuth become an `EcsPosition3` unit
+direction; the packed `sun_color_rgb` becomes the light's `EcsRgb`. If
+the `light` entity isn't present (e.g. headless test) the system logs
+once via `ecs_dbg` and no-ops.
+
 ## Known limitations
 
-- Trains and pedestrians reuse the `Car` prefab; dedicated prefabs are
-  pending. Aircraft and vessels likewise.
-- `BeamEnv` is stored as a singleton component but the renderer does not
-  yet read it; the field is plumbed for the next render-side patch.
 - `suppress_procedural_traffic` zeroes future spawns but leaves any
   emitters that already spawned during the synchronous `SetCity` hook;
   those cars drive off-map within seconds via `ExpireTraffic`.
-- `beam_agent_remove` does not know the kind, so it probes all kinds.
-  This is O(kinds), not O(map).

@@ -65,6 +65,7 @@ const FEED_ID_NONE = 0 >>> 0;
 
 type V_void = () => void;
 type V_u32 = (a: number) => void;
+type V_u32u8 = (a: number, b: number) => void;
 type V_u32u8_5f = (
   a: number,
   b: number,
@@ -91,8 +92,10 @@ export class FlecsBridge {
   private _endFrame!: V_void;
   private _agentUpsert!: V_u32u8_5f;
   private _agentRemove!: V_u32;
+  private _agentRemoveKind!: V_u32u8;
   private _feedUpsert!: V_u32u8_5f;
   private _feedRemove!: V_u32;
+  private _feedRemoveKind!: V_u32u8;
   private _setEnv!: V_env;
   private _clearAll!: V_void;
   private _liveCount!: R_u32;
@@ -131,6 +134,10 @@ export class FlecsBridge {
       "number",
     ]) as V_u32u8_5f;
     this._agentRemove = cw("beam_agent_remove", null, ["number"]) as V_u32;
+    this._agentRemoveKind = cw("beam_agent_remove_kind", null, [
+      "number",
+      "number",
+    ]) as V_u32u8;
     this._feedUpsert = cw("beam_feed_upsert", null, [
       "number",
       "number",
@@ -140,6 +147,10 @@ export class FlecsBridge {
       "number",
     ]) as V_u32u8_5f;
     this._feedRemove = cw("beam_feed_remove", null, ["number"]) as V_u32;
+    this._feedRemoveKind = cw("beam_feed_remove_kind", null, [
+      "number",
+      "number",
+    ]) as V_u32u8;
     this._setEnv = cw("beam_set_env", null, [
       "number",
       "number",
@@ -179,6 +190,10 @@ export class FlecsBridge {
     this._agentRemove(remoteId >>> 0);
   }
 
+  removeAgentKind(remoteId: number, kind: number): void {
+    this._agentRemoveKind(remoteId >>> 0, kind & 0xff);
+  }
+
   upsertFeed(
     remoteId: number,
     kind: number,
@@ -192,6 +207,10 @@ export class FlecsBridge {
 
   removeFeed(remoteId: number): void {
     this._feedRemove(remoteId >>> 0);
+  }
+
+  removeFeedKind(remoteId: number, kind: number): void {
+    this._feedRemoveKind(remoteId >>> 0, kind & 0xff);
   }
 
   setEnv(
@@ -274,17 +293,17 @@ export class FlecsBridge {
         for (let i = 0; i < n; i++) {
           const r = recs[i];
           const id = fnv1a32(r.id);
-          if ((r.flags & FEED_FLAG_REMOVED) !== 0) {
-            this._feedRemove(id);
-            this.liveFeedIds.delete(id);
-            continue;
-          }
           assertInRange(
             r.kind,
             FEED_KIND_AIRCRAFT,
             FEED_KIND_VESSEL,
             "feed.kind",
           );
+          if ((r.flags & FEED_FLAG_REMOVED) !== 0) {
+            this._feedRemoveKind(id, r.kind & 0xff);
+            this.liveFeedIds.delete(id);
+            continue;
+          }
           // Wire feeds carry lon/lat/altM — the bridge expects scene-local
           // metres. The server is supposed to have already mapped them, but
           // the contract isn't strict here, so we just forward the floats:
@@ -317,7 +336,7 @@ export class FlecsBridge {
       const next = newAgentCount[k];
       if (prev > next) {
         for (let i = next; i < prev; i++) {
-          this._agentRemove(FlecsBridge.agentRemoteId(k, i));
+          this._agentRemoveKind(FlecsBridge.agentRemoteId(k, i), k & 0xff);
         }
       }
       this.prevAgentCount[k] = next;

@@ -1,7 +1,8 @@
 import * as THREE from "three";
+import { assert, assertU32, checkLoopBound } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
-import { extrudePolygons } from "./util";
+import { extrudePolygons, MAX_FEATURES_PER_TILE, MAX_VERTICES_PER_TILE } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
 
 // Deterministic 0.8..1.4 hash for visual variation when render_height is 0.
@@ -43,6 +44,10 @@ export class BuildingsLayer implements Layer {
   }
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
+    assertU32(tile.z, "BuildingsLayer.load: tile.z");
+    assertU32(tile.x, "BuildingsLayer.load: tile.x");
+    assertU32(tile.y, "BuildingsLayer.load: tile.y");
+    assert(!!ctx.sceneOrigin, "BuildingsLayer.load: sceneOrigin missing");
     const tileKey = `${tile.z}/${tile.x}/${tile.y}`;
     const extruded = extrudePolygons(g, ctx.sceneOrigin, (_cls, fi) => {
       // Fallback when render_height isn't present: 12 m × per-feature jitter.
@@ -65,10 +70,17 @@ export class BuildingsLayer implements Layer {
     // Build vertexFeatureMap by walking the index ranges. Vertices are owned by
     // exactly one feature in our extrusion output (per-feature local vertices).
     const indexAttr = geometry.getIndex()!;
+    assert(
+      featureRanges.length === featureIds.length + 1,
+      "BuildingsLayer.load: featureRanges length mismatch",
+    );
     for (let fi = 0; fi < featureIds.length; fi++) {
+      checkLoopBound(fi, MAX_FEATURES_PER_TILE, "BuildingsLayer.load: feature loop");
       const start = featureRanges[fi];
       const end = featureRanges[fi + 1];
+      assert(start <= end, `BuildingsLayer.load: bad featureRange[${fi}]`);
       for (let i = start; i < end; i++) {
+        checkLoopBound(i - start, MAX_VERTICES_PER_TILE, "BuildingsLayer.load: index loop");
         vertexFeatureMap[indexAttr.getX(i)] = fi;
       }
     }
@@ -82,6 +94,7 @@ export class BuildingsLayer implements Layer {
 
     const globalIds = new Array<string>(featureIds.length);
     for (let i = 0; i < featureIds.length; i++) {
+      checkLoopBound(i, MAX_FEATURES_PER_TILE, "BuildingsLayer.load: globalIds");
       globalIds[i] = `${tileKey}:${featureIds[i]}`;
     }
 
@@ -134,6 +147,7 @@ export class BuildingsLayer implements Layer {
     const arr = h.selectedAttr.array as Float32Array;
     // Walk vertexFeatureMap and set.
     for (let v = 0; v < arr.length; v++) {
+      checkLoopBound(v, MAX_VERTICES_PER_TILE, "BuildingsLayer.applyHighlight: vert walk");
       if (h.vertexFeatureMap[v] === fi) arr[v] = value;
     }
     h.selectedAttr.needsUpdate = true;

@@ -6,6 +6,13 @@ import Pbf from "pbf";
 import earcut from "earcut";
 import { gunzipSync } from "fflate";
 import {
+  assert,
+  assertU32,
+  assertFinite,
+  assertInRange,
+  checkLoopBound,
+} from "@map3d/data-core";
+import {
   tileMetersBox,
   tileLocalToMeters,
   type MetersBox,
@@ -18,6 +25,18 @@ import { openmaptiles } from "./schemas/openmaptiles";
 import { bakeRibbonMesh, type RibbonConfig } from "./ribbonGen";
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tiger Style hard caps. These are sanity bounds on *untrusted tile bytes*;
+// any real-world OMT / Protomaps tile sits orders of magnitude below them.
+// If a real tile ever trips one, loosen here and document why.
+// ────────────────────────────────────────────────────────────────────────────
+const MAX_TILE_BYTES = 64 * 1024 * 1024; // 64 MiB compressed/uncompressed
+const MAX_FEATURES_PER_LAYER = 200_000;
+const MAX_VERTICES_PER_TILE = 1_000_000;
+const MAX_RINGS_PER_FEATURE = 65_536;
+const MAX_POINTS_PER_RING = 1_000_000;
+const MAX_TILE_ZOOM = 24;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Tile sources
@@ -133,6 +152,37 @@ function freezeGeometry(
   kind: "polygon" | "line" | "point",
   a: FeatureAccum,
 ): LayerGeometry {
+  // Tiger Style: verify SoA sentinel invariants before we hand bytes to the
+  // main thread. featureStart has one extra terminating entry past the count.
+  const featureCount = a.featureIds.length;
+  assertU32(featureCount, "featureCount");
+  assert(featureCount <= MAX_FEATURES_PER_LAYER, "feature cap");
+  assert(a.featureStart.length === featureCount + 1, "featureStart length");
+  assert(a.featureClass.length === featureCount, "featureClass length");
+  assert(a.featureHeight.length === featureCount, "featureHeight length");
+  assert(a.featureMinHeight.length === featureCount, "featureMinHeight length");
+  assert(a.positions.length % 2 === 0, "positions xy pairs");
+  const vertexCount = a.positions.length / 2;
+  assertU32(vertexCount, "vertexCount");
+  assert(vertexCount <= MAX_VERTICES_PER_TILE, "vertex cap");
+  // Sentinel monotonicity + bounds.
+  const sentinelMax = kind === "polygon" ? a.indices.length : vertexCount;
+  let prev = 0;
+  for (let i = 0; i < a.featureStart.length; i++) {
+    checkLoopBound(i, MAX_FEATURES_PER_LAYER + 2, "featureStart");
+    const s = a.featureStart[i];
+    assertU32(s, "featureStart[i]");
+    assert(s >= prev, "featureStart monotonic");
+    assert(s <= sentinelMax, "featureStart in range");
+    prev = s;
+  }
+  if (kind === "polygon") {
+    assert(a.indices.length % 3 === 0, "polygon indices%3");
+    for (let i = 0; i < a.indices.length; i++) {
+      // Cheap spot-check: every index must point at a real vertex.
+      assert(a.indices[i] < vertexCount, "polygon index<vertexCount");
+    }
+  }
   return {
     kind,
     positions: new Float32Array(a.positions),
@@ -151,24 +201,47 @@ function triangulateAndAppend(
   box: MetersBox,
   extent: number,
 ) {
+  assertU32(extent, "extent");
+  assert(extent > 0, "extent positive");
+  assert(rings.length <= MAX_RINGS_PER_FEATURE, "rings/feature cap");
   const flat: number[] = [];
   const holes: number[] = [];
   const baseVertex = accum.positions.length / 2;
+  assertU32(baseVertex, "baseVertex");
   for (let i = 0; i < rings.length; i++) {
+    checkLoopBound(i, MAX_RINGS_PER_FEATURE, "rings");
     if (i > 0) holes.push(flat.length / 2);
-    for (const p of rings[i]) {
+    const ring = rings[i];
+    assert(ring.length <= MAX_POINTS_PER_RING, "ring point cap");
+    for (let pi = 0; pi < ring.length; pi++) {
+      checkLoopBound(pi, MAX_POINTS_PER_RING, "ring points");
+      const p = ring[pi];
       const m = tileLocalToMeters(box, extent, p.x, p.y);
+      assertFinite(m.x, "ring mx");
+      assertFinite(m.y, "ring my");
       flat.push(m.x, m.y);
     }
   }
   if (flat.length < 6) return;
   const tri = earcut(flat, holes);
   if (tri.length === 0) return;
+  assert(tri.length % 3 === 0, "earcut tri%3");
   for (let i = 0; i < flat.length; i++) accum.positions.push(flat[i]);
   for (let i = 0; i < tri.length; i++) accum.indices.push(baseVertex + tri[i]);
 }
 
 function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedTile {
+  // Tiger Style: assert all coords entering from untrusted RPC payload.
+  assertU32(z, "z");
+  assertU32(x, "x");
+  assertU32(y, "y");
+  assertInRange(z, 0, MAX_TILE_ZOOM, "z range");
+  const tilesPerAxis = 1 << z;
+  assertInRange(x, 0, tilesPerAxis - 1, "x range");
+  assertInRange(y, 0, tilesPerAxis - 1, "y range");
+  assert(bytes.byteLength > 0, "tile bytes nonempty");
+  assert(bytes.byteLength <= MAX_TILE_BYTES, "tile bytes cap");
+
   const box = tileMetersBox(z, x, y);
   // OpenFreeMap serves gzip; the browser usually decompresses, but bare bytes
   // (range reads from PMTiles or proxies that pass-through gzip) can land here
@@ -177,6 +250,7 @@ function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedT
   const view = new Uint8Array(bytes);
   if (view.length > 2 && view[0] === 0x1f && view[1] === 0x8b) {
     const out = gunzipSync(view);
+    assert(out.byteLength <= MAX_TILE_BYTES, "inflated tile bytes cap");
     buf = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
   }
   const vt = new VectorTile(new Pbf(buf));
@@ -201,27 +275,39 @@ function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedT
       const lyr = vt.layers[alias];
       if (!lyr) continue;
       const extent = lyr.extent ?? 4096;
+      assertU32(extent, "lyr.extent");
+      assert(extent > 0 && extent <= 1 << 16, "extent sane");
+      assert(lyr.length <= MAX_FEATURES_PER_LAYER, "lyr.length cap");
 
       for (let i = 0; i < lyr.length; i++) {
+        checkLoopBound(i, MAX_FEATURES_PER_LAYER, "lyr.feature");
         const f = lyr.feature(i);
         if (f.type !== expectedType) continue;
         const props = f.properties as Record<string, unknown>;
         const cls = schema.classify(targetLayer, alias, props);
         if (cls === null) continue;
         const rings = f.loadGeometry();
+        assert(rings.length <= MAX_RINGS_PER_FEATURE, "rings cap");
 
         if (f.type === 3) {
           // POLYGONS — earcut each closed sub-polygon. One MVT feature can have
           // multiple polygons (outer ring with negative-area holes follows it).
           const startBefore = accum.indices.length;
           let i2 = 0;
+          let guard = 0;
           while (i2 < rings.length) {
+            checkLoopBound(guard++, MAX_RINGS_PER_FEATURE, "poly outer scan");
             const outer = rings[i2++];
             const polyRings: { x: number; y: number }[][] = [outer];
             while (i2 < rings.length) {
+              checkLoopBound(i2, MAX_RINGS_PER_FEATURE, "poly hole scan");
               const r = rings[i2];
               const flat: number[] = [];
-              for (const p of r) flat.push(p.x, p.y);
+              assert(r.length <= MAX_POINTS_PER_RING, "hole ring point cap");
+              for (let pi = 0; pi < r.length; pi++) {
+                checkLoopBound(pi, MAX_POINTS_PER_RING, "hole ring pts");
+                flat.push(r[pi].x, r[pi].y);
+              }
               if (ringArea(flat) >= 0) break;
               polyRings.push(r);
               i2++;
@@ -230,39 +316,59 @@ function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedT
           }
           if (accum.indices.length === startBefore) continue;
           const fid = nextFeatureId++;
+          assertU32(fid, "poly fid");
+          assert(nextFeatureId <= MAX_FEATURES_PER_LAYER, "poly featureCount cap");
           accum.featureIds.push(fid);
           accum.featureClass.push(cls);
-          accum.featureHeight.push(schema.heightFor(props));
-          accum.featureMinHeight.push(schema.minHeightFor(props));
+          const hh = schema.heightFor(props);
+          const mh = schema.minHeightFor(props);
+          assertFinite(hh, "feature height");
+          assertFinite(mh, "feature min height");
+          accum.featureHeight.push(hh);
+          accum.featureMinHeight.push(mh);
           pushAttr(accum.attributes, targetLayer, fid, props);
           accum.featureStart.push(accum.indices.length);
         } else if (f.type === 2) {
           // LINES — emit each MVT geometry "part" (one polyline) as its own
           // feature, so disconnected segments aren't dragged into one ribbon.
-          for (const line of rings) {
+          for (let li = 0; li < rings.length; li++) {
+            checkLoopBound(li, MAX_RINGS_PER_FEATURE, "line parts");
+            const line = rings[li];
             if (line.length < 2) continue;
-            const before = accum.positions.length / 2;
-            for (const p of line) {
+            assert(line.length <= MAX_POINTS_PER_RING, "line point cap");
+            for (let pi = 0; pi < line.length; pi++) {
+              checkLoopBound(pi, MAX_POINTS_PER_RING, "line points");
+              const p = line[pi];
               const m = tileLocalToMeters(box, extent, p.x, p.y);
+              assertFinite(m.x, "line mx");
+              assertFinite(m.y, "line my");
               accum.positions.push(m.x, m.y);
             }
             const fid = nextFeatureId++;
+            assertU32(fid, "line fid");
             accum.featureIds.push(fid);
             accum.featureClass.push(cls);
             accum.featureHeight.push(0);
             accum.featureMinHeight.push(0);
             pushAttr(accum.attributes, targetLayer, fid, props);
             accum.featureStart.push(accum.positions.length / 2);
-            void before;
           }
         } else if (f.type === 1) {
           // POINTS — one MVT feature can have multiple points; emit each as
           // its own feature so InstancedMesh slots stay 1:1 with featureIds.
-          for (const pts of rings) {
-            for (const p of pts) {
+          for (let pgi = 0; pgi < rings.length; pgi++) {
+            checkLoopBound(pgi, MAX_RINGS_PER_FEATURE, "point groups");
+            const pts = rings[pgi];
+            assert(pts.length <= MAX_POINTS_PER_RING, "point group cap");
+            for (let pi = 0; pi < pts.length; pi++) {
+              checkLoopBound(pi, MAX_POINTS_PER_RING, "point group points");
+              const p = pts[pi];
               const m = tileLocalToMeters(box, extent, p.x, p.y);
+              assertFinite(m.x, "point mx");
+              assertFinite(m.y, "point my");
               accum.positions.push(m.x, m.y);
               const fid = nextFeatureId++;
+              assertU32(fid, "point fid");
               accum.featureIds.push(fid);
               accum.featureClass.push(cls);
               accum.featureHeight.push(0);
@@ -382,30 +488,59 @@ interface InitPayload {
 }
 
 ctx.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+  // Tiger Style: validate every field on the message handler entry. The
+  // payload is bytes from another realm; treat it as untrusted.
+  assert(e.data !== null && typeof e.data === "object", "msg envelope");
   const { id, type, payload } = e.data;
+  assertU32(id, "msg id");
+  assert(typeof type === "string" && type.length > 0, "msg type string");
   try {
     if (type === "init") {
+      assert(payload !== null && typeof payload === "object", "init payload");
       const p = payload as InitPayload;
+      assert(
+        p.source.kind === "pmtiles" || p.source.kind === "mvt",
+        "init.source.kind",
+      );
       source =
         p.source.kind === "pmtiles" ? new PMTilesSource(p.source.url) : new MVTSource(p.source.urlTemplate);
+      assert(
+        p.schema === "openmaptiles" || p.schema === "protomaps-v4",
+        "init.schema",
+      );
       schema = p.schema === "openmaptiles" ? openmaptiles : protomapsV4;
-      if (p.sceneOrigin) sceneOrigin = p.sceneOrigin;
+      if (p.sceneOrigin) {
+        assertFinite(p.sceneOrigin.x, "sceneOrigin.x");
+        assertFinite(p.sceneOrigin.y, "sceneOrigin.y");
+        sceneOrigin = p.sceneOrigin;
+      }
       if (p.ribbonConfigs) ribbonConfigs = p.ribbonConfigs;
       reply(id, true, { ok: true });
     } else if (type === "fetchTile") {
       if (!source) throw new Error("worker not initialised");
+      assert(payload !== null && typeof payload === "object", "fetchTile payload");
       const { z, x, y } = payload as { z: number; x: number; y: number };
+      assertU32(z, "fetchTile.z");
+      assertU32(x, "fetchTile.x");
+      assertU32(y, "fetchTile.y");
+      assertInRange(z, 0, MAX_TILE_ZOOM, "fetchTile.z range");
+      const axis = 1 << z;
+      assertInRange(x, 0, axis - 1, "fetchTile.x range");
+      assertInRange(y, 0, axis - 1, "fetchTile.y range");
       const bytes = await source.getTile(z, x, y);
       if (!bytes) {
         reply(id, true, { missing: true, z, x, y });
         return;
       }
+      assert(bytes.byteLength > 0, "fetched tile bytes");
+      assert(bytes.byteLength <= MAX_TILE_BYTES, "fetched tile bytes cap");
       const parsed = parseTile(z, x, y, bytes);
       reply(id, true, { tile: parsed, missing: false }, transferablesOf(parsed));
     } else {
       throw new Error(`unknown message: ${type}`);
     }
   } catch (err) {
+    // Surface, never swallow. The pool rejects the matching pending RPC.
     reply(id, false, undefined, [], err instanceof Error ? err.message : String(err));
   }
 };

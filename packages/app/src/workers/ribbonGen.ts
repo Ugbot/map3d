@@ -9,7 +9,18 @@
 // flipped so mercator north → scene -Z) so the main thread can attach the
 // blob to a BufferGeometry without any further transform.
 
+import {
+  assert,
+  assertU32,
+  assertFinite,
+  checkLoopBound,
+} from "@map3d/data-core";
 import type { LayerGeometry } from "../cache/types";
+
+// Tiger Style bounds — generous, but ensure a malformed tile cannot push us
+// into a runaway alloc. See tileFetch.worker.ts for the matching caps.
+const MAX_RIBBON_FEATURES = 200_000;
+const MAX_RIBBON_VERTICES = 1_000_000;
 
 export interface RibbonConfig {
   thickness: number;
@@ -35,6 +46,20 @@ export function bakeRibbonMesh(
   cfg: RibbonConfig,
 ): BakedMesh | null {
   if (g.kind !== "line") return null;
+  // Tiger Style entry checks. `g` is already produced by freezeGeometry, but
+  // origin/cfg come from RPC payload; treat them as untrusted.
+  assertFinite(origin.x, "ribbon origin.x");
+  assertFinite(origin.y, "ribbon origin.y");
+  assertFinite(cfg.thickness, "ribbon thickness");
+  assert(cfg.thickness >= 0, "ribbon thickness >= 0");
+  const featureCount = g.featureIds.length;
+  assertU32(featureCount, "ribbon featureCount");
+  assert(featureCount <= MAX_RIBBON_FEATURES, "ribbon feature cap");
+  assert(g.featureStart.length === featureCount + 1, "ribbon featureStart len");
+  assert(g.positions.length % 2 === 0, "ribbon positions xy");
+  const inVerts = g.positions.length / 2;
+  assert(inVerts <= MAX_RIBBON_VERTICES, "ribbon input vertex cap");
+
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
@@ -42,13 +67,15 @@ export function bakeRibbonMesh(
   const featureIds: number[] = [];
   const yBot = 0;
   const yTop = cfg.thickness;
-  const featureCount = g.featureIds.length;
   const fallbackW = cfg.widthByClass[0] ?? 4;
   const wantUVs = cfg.textureLengthM !== undefined && cfg.textureSideUV !== undefined;
 
   for (let fi = 0; fi < featureCount; fi++) {
+    checkLoopBound(fi, MAX_RIBBON_FEATURES, "ribbon features");
     const vStart = g.featureStart[fi];
     const vEnd = g.featureStart[fi + 1];
+    assert(vEnd >= vStart, "ribbon featureStart monotonic");
+    assert(vEnd <= inVerts, "ribbon featureStart in range");
     if (vEnd - vStart < 2) {
       featureRanges.push(indices.length);
       featureIds.push(g.featureIds[fi]);
@@ -56,7 +83,9 @@ export function bakeRibbonMesh(
     }
     const cls = g.featureClass[fi];
     const halfW = (cfg.widthByClass[cls] ?? fallbackW) * 0.5;
+    assertFinite(halfW, "ribbon halfW");
     const ptCount = vEnd - vStart;
+    assert(ptCount <= MAX_RIBBON_VERTICES, "ribbon ptCount cap");
     // Project points to scene-local XZ once so the inner loops can be tight.
     const pts = new Float32Array(ptCount * 2);
     for (let i = 0; i < ptCount; i++) {
@@ -123,6 +152,16 @@ export function bakeRibbonMesh(
     featureRanges.push(indices.length);
     featureIds.push(g.featureIds[fi]);
   }
+
+  // Sentinel invariants before handing off to main thread.
+  assert(positions.length % 3 === 0, "ribbon positions xyz");
+  assert(indices.length % 3 === 0, "ribbon indices % 3");
+  assert(
+    featureRanges.length === featureIds.length + 1,
+    "ribbon featureRanges length",
+  );
+  assert(featureIds.length === featureCount, "ribbon featureIds == in count");
+  if (wantUVs) assert(uvs.length === (positions.length / 3) * 2, "ribbon uvs len");
 
   return {
     positions: new Float32Array(positions),

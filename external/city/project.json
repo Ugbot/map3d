@@ -23,7 +23,7 @@
                 "-sSTACK_SIZE=1000000",
                 "-Wl,-u,ntohs",
                 "-sALLOW_MEMORY_GROWTH=1",
-                "-sEXPORTED_FUNCTIONS=['_main','_beam_init','_beam_begin_frame','_beam_end_frame','_beam_agent_upsert','_beam_agent_remove','_beam_feed_upsert','_beam_feed_remove','_beam_set_env','_beam_clear_all','_beam_live_count','_malloc','_free']",
+                "-sEXPORTED_FUNCTIONS=['_main','_beam_init','_beam_begin_frame','_beam_end_frame','_beam_agent_upsert','_beam_agent_remove','_beam_agent_remove_kind','_beam_feed_upsert','_beam_feed_remove','_beam_feed_remove_kind','_beam_set_env','_beam_clear_all','_beam_live_count','_malloc','_free']",
                 "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPU8','HEAPF32','HEAPU32']"
             ],
             "embed": ["etc/assets"]

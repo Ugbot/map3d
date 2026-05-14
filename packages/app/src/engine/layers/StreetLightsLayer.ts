@@ -9,9 +9,16 @@
 import * as THREE from "three";
 import { MeshStandardNodeMaterial } from "three/webgpu";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { assert, assertFinite, assertU32, checkLoopBound } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { RoadClass } from "../../cache/classes";
+import {
+  assertLayerGeometry,
+  assertOrigin,
+  MAX_FEATURES_PER_TILE,
+  MAX_VERTICES_PER_TILE,
+} from "./util";
 
 // Sparser, taller posts — the real lamps below carry the light, so we don't
 // need a forest of meshes. Roughly 1 lamp every ~100 m of road, both sides.
@@ -73,21 +80,29 @@ export class StreetLightsLayer implements Layer {
   }
 
   load(tile: ParsedTile, _g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
+    assertU32(tile.z, "StreetLightsLayer.load: tile.z");
+    assertU32(tile.x, "StreetLightsLayer.load: tile.x");
+    assertU32(tile.y, "StreetLightsLayer.load: tile.y");
+    assertOrigin(ctx.sceneOrigin, "StreetLightsLayer.load");
     // We don't use the LayerGeometry passed in — we read the *roads* layer
     // from the parsed tile instead. TileManager calls `load` once per layer
     // alias; for streetlights we explicitly piggy-back on roads data.
     const roads = tile.layers.roads;
     if (!roads || roads.kind !== "line") return null;
+    assertLayerGeometry(roads, "StreetLightsLayer.load: roads");
 
     const positions = sampleAlongRoads(roads, ctx.sceneOrigin);
     if (positions.length === 0) return null;
+    assert(positions.length % 3 === 0, "StreetLightsLayer.load: positions length not multiple of 3");
     const count = Math.min(PER_TILE_CAP, positions.length / 3);
+    assertU32(count, "StreetLightsLayer.load: instance count");
     const mesh = new THREE.InstancedMesh(this.geo, this.material, count);
     mesh.frustumCulled = false;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     const m = new THREE.Matrix4();
     for (let i = 0; i < count; i++) {
+      checkLoopBound(i, PER_TILE_CAP + 1, "StreetLightsLayer.load: instance walk");
       m.makeTranslation(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       mesh.setMatrixAt(i, m);
     }
@@ -98,6 +113,7 @@ export class StreetLightsLayer implements Layer {
     // Lamp head world positions (use POST_HEIGHT_M for the bulb height).
     const headPositions = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
+      checkLoopBound(i, PER_TILE_CAP + 1, "StreetLightsLayer.load: head walk");
       headPositions[i * 3 + 0] = positions[i * 3 + 0];
       headPositions[i * 3 + 1] = POST_HEIGHT_M + 0.2;
       headPositions[i * 3 + 2] = positions[i * 3 + 2];
@@ -133,6 +149,8 @@ export class StreetLightsLayer implements Layer {
   }
 
   update(_t: number, sunAltitude: number, glow: number): void {
+    assertFinite(sunAltitude, "StreetLightsLayer.update: sunAltitude");
+    assertFinite(glow, "StreetLightsLayer.update: glow");
     // The mesh itself only carries enough emissive to make the bulb visible
     // as a glow point; the actual lighting on surrounding geometry is done by
     // the real PointLight pool that follows the camera. Without this dial-
@@ -149,18 +167,27 @@ function sampleAlongRoads(
   g: LayerGeometry,
   origin: { x: number; y: number },
 ): Float32Array {
+  assertOrigin(origin, "sampleAlongRoads");
+  const vertCountTotal = g.positions.length / 2;
   const out: number[] = [];
   const fc = g.featureIds.length;
+  assert(fc <= MAX_FEATURES_PER_TILE, `sampleAlongRoads: feature count ${fc} exceeds cap`);
   for (let fi = 0; fi < fc; fi++) {
+    checkLoopBound(fi, MAX_FEATURES_PER_TILE, "sampleAlongRoads: feature walk");
     const cls = g.featureClass[fi];
     if (!LIT_CLASSES.has(cls)) continue;
     const vStart = g.featureStart[fi];
     const vEnd = g.featureStart[fi + 1];
+    assert(
+      vStart <= vEnd && vEnd <= vertCountTotal,
+      `sampleAlongRoads: bad featureStart range [${vStart},${vEnd}]`,
+    );
     if (vEnd - vStart < 2) continue;
     // Build local XZ polyline (subtract origin, flip Y → -Z).
     const ptCount = vEnd - vStart;
     const pts = new Float32Array(ptCount * 2);
     for (let i = 0; i < ptCount; i++) {
+      checkLoopBound(i, MAX_VERTICES_PER_TILE, "sampleAlongRoads: pt walk");
       pts[i * 2] = g.positions[(vStart + i) * 2] - origin.x;
       pts[i * 2 + 1] = -(g.positions[(vStart + i) * 2 + 1] - origin.y);
     }
@@ -168,6 +195,7 @@ function sampleAlongRoads(
     let segDist = 0;
     let nextDrop = SAMPLE_INTERVAL_M * 0.5;
     for (let i = 1; i < ptCount; i++) {
+      checkLoopBound(i, MAX_VERTICES_PER_TILE, "sampleAlongRoads: segment walk");
       const ax = pts[(i - 1) * 2];
       const az = pts[(i - 1) * 2 + 1];
       const bx = pts[i * 2];
@@ -183,7 +211,11 @@ function sampleAlongRoads(
       const nz = tx;
       const offset = lampOffsetForClass(cls);
       let acc = 0;
+      let dropIter = 0;
       while (acc + (nextDrop - segDist) <= segLen) {
+        // Bound: ≤ PER_TILE_CAP lamps will be kept; allow some headroom
+        // because the function emits both sides and we cap downstream.
+        checkLoopBound(dropIter++, PER_TILE_CAP * 4, "sampleAlongRoads: drop walk");
         const along = nextDrop - segDist + acc;
         const cx = ax + tx * along;
         const cz = az + tz * along;

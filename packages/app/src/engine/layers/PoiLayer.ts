@@ -5,10 +5,12 @@
 // drown the scene.
 
 import * as THREE from "three";
+import { assert, assertFinite, assertU32, checkLoopBound } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
 import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { makeGlowMaterial } from "./glowMaterial";
 import { PoiColor } from "../../cache/classes";
+import { assertOrigin, MAX_FEATURES_PER_TILE } from "./util";
 
 interface PoiHandle extends TileMeshHandle {
   mesh: THREE.InstancedMesh;
@@ -43,7 +45,21 @@ export class PoiLayer implements Layer {
 
   load(tile: ParsedTile, g: LayerGeometry, ctx: LayerContext): TileMeshHandle | null {
     if (g.kind !== "point" || g.featureIds.length === 0) return null;
+    assertU32(tile.z, "PoiLayer.load: tile.z");
+    assertU32(tile.x, "PoiLayer.load: tile.x");
+    assertU32(tile.y, "PoiLayer.load: tile.y");
+    assertOrigin(ctx.sceneOrigin, "PoiLayer.load");
+    assert(g.positions.length % 2 === 0, "PoiLayer.load: positions not even");
     const count = g.featureIds.length;
+    assert(
+      count <= MAX_FEATURES_PER_TILE,
+      `PoiLayer.load: count ${count} exceeds cap ${MAX_FEATURES_PER_TILE}`,
+    );
+    assert(
+      g.featureStart.length >= count,
+      "PoiLayer.load: featureStart shorter than featureIds",
+    );
+    const vertCountTotal = g.positions.length / 2;
     const mesh = new THREE.InstancedMesh(this.geo, this.material, count);
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
     const m = new THREE.Matrix4();
@@ -51,7 +67,9 @@ export class PoiLayer implements Layer {
     let sumX = 0;
     let sumZ = 0;
     for (let i = 0; i < count; i++) {
+      checkLoopBound(i, MAX_FEATURES_PER_TILE, "PoiLayer.load: instance walk");
       const v = g.featureStart[i];
+      assert(v < vertCountTotal, `PoiLayer.load: featureStart[${i}]=${v} OOB`);
       const x = g.positions[v * 2] - ctx.sceneOrigin.x;
       const z = -(g.positions[v * 2 + 1] - ctx.sceneOrigin.y);
       m.makeTranslation(x, 0, z);
@@ -98,6 +116,8 @@ export class PoiLayer implements Layer {
   }
 
   cullByCamera(cameraX: number, cameraZ: number): void {
+    assertFinite(cameraX, "PoiLayer.cullByCamera: cameraX");
+    assertFinite(cameraZ, "PoiLayer.cullByCamera: cameraZ");
     for (const h of this.handles.values()) {
       const dx = h.centerX - cameraX;
       const dz = h.centerZ - cameraZ;

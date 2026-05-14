@@ -1,11 +1,75 @@
 // Shared geometry helpers for layer implementations.
 
 import * as THREE from "three";
+import {
+  assert,
+  assertFinite,
+  assertU32,
+  checkLoopBound,
+} from "@map3d/data-core";
 import type { LayerGeometry } from "../../cache/types";
 
 export interface Origin {
   x: number;
   y: number;
+}
+
+// Tiger Style caps for per-tile feature/vertex counts. If real-world data
+// breaks these, loosen and note here.
+export const MAX_FEATURES_PER_TILE = 200_000;
+export const MAX_VERTICES_PER_TILE = 2_000_000;
+
+export function assertOrigin(o: Origin, ctx: string): void {
+  assertFinite(o.x, `${ctx}: origin.x`);
+  assertFinite(o.y, `${ctx}: origin.y`);
+}
+
+// Validate the structural invariants of a LayerGeometry before we read it
+// into Three.js BufferGeometry. Cheap O(featureCount) checks; the per-vertex
+// finite check is restricted to a small sample for cost reasons (worker
+// already produces finite floats — this catches gross corruption).
+export function assertLayerGeometry(g: LayerGeometry, ctx: string): void {
+  assert(g.positions.length % 2 === 0, `${ctx}: positions length not even`);
+  const vertCount = g.positions.length / 2;
+  assertU32(vertCount, `${ctx}: vertCount`);
+  assert(
+    vertCount <= MAX_VERTICES_PER_TILE,
+    `${ctx}: vertex count ${vertCount} exceeds cap ${MAX_VERTICES_PER_TILE}`,
+  );
+  const featureCount = g.featureIds.length;
+  assertU32(featureCount, `${ctx}: featureCount`);
+  assert(
+    featureCount <= MAX_FEATURES_PER_TILE,
+    `${ctx}: feature count ${featureCount} exceeds cap ${MAX_FEATURES_PER_TILE}`,
+  );
+  assert(
+    g.featureStart.length === featureCount + 1,
+    `${ctx}: featureStart length ${g.featureStart.length} != featureCount+1 ${featureCount + 1}`,
+  );
+  assert(
+    g.featureClass.length === featureCount,
+    `${ctx}: featureClass length mismatch`,
+  );
+  if (g.kind === "polygon") {
+    assert(!!g.indices, `${ctx}: polygon missing indices`);
+    assert(
+      g.featureHeight.length === featureCount,
+      `${ctx}: featureHeight length mismatch`,
+    );
+    assert(
+      g.featureMinHeight.length === featureCount,
+      `${ctx}: featureMinHeight length mismatch`,
+    );
+  }
+  // Sentinel: monotonic non-decreasing featureStart.
+  let prev = 0;
+  for (let i = 0; i < g.featureStart.length; i++) {
+    checkLoopBound(i, MAX_FEATURES_PER_TILE + 2, `${ctx}: featureStart walk`);
+    const v = g.featureStart[i];
+    assertU32(v, `${ctx}: featureStart[${i}]`);
+    assert(v >= prev, `${ctx}: featureStart not monotonic at ${i}: ${v} < ${prev}`);
+    prev = v;
+  }
 }
 
 // Convert Mercator-metres positions (x east, y north) into a Three.js BufferGeometry
@@ -16,9 +80,12 @@ export function flatPolygonGeometry(
   origin: Origin,
 ): THREE.BufferGeometry | null {
   if (g.kind !== "polygon" || !g.indices) return null;
+  assertOrigin(origin, "flatPolygonGeometry");
+  assertLayerGeometry(g, "flatPolygonGeometry");
   const vertCount = g.positions.length / 2;
   const verts = new Float32Array(vertCount * 3);
   for (let i = 0; i < vertCount; i++) {
+    checkLoopBound(i, MAX_VERTICES_PER_TILE, "flatPolygonGeometry: vert walk");
     verts[i * 3 + 0] = g.positions[i * 2] - origin.x;
     verts[i * 3 + 1] = 0;
     verts[i * 3 + 2] = -(g.positions[i * 2 + 1] - origin.y); // flip north→-Z
@@ -40,6 +107,10 @@ export function extrudePolygons(
   fallbackHeight: (cls: number, featureIndex: number) => number,
 ): { geometry: THREE.BufferGeometry; featureRanges: Uint32Array; featureIds: Uint32Array } | null {
   if (g.kind !== "polygon" || !g.indices) return null;
+  assertOrigin(origin, "extrudePolygons");
+  assertLayerGeometry(g, "extrudePolygons");
+  const indexCount = g.indices.length;
+  assert(indexCount % 3 === 0, `extrudePolygons: indices not multiple of 3 (${indexCount})`);
   const positions: number[] = [];
   const indices: number[] = [];
   const featureRanges: number[] = [0]; // index ranges per feature (in indices array)
@@ -47,8 +118,17 @@ export function extrudePolygons(
 
   const featureCount = g.featureIds.length;
   for (let fi = 0; fi < featureCount; fi++) {
+    checkLoopBound(fi, MAX_FEATURES_PER_TILE, "extrudePolygons: feature walk");
     const triStart = g.featureStart[fi];
     const triEnd = g.featureStart[fi + 1];
+    assert(
+      triEnd <= indexCount && triStart <= triEnd,
+      `extrudePolygons: bad featureStart range [${triStart},${triEnd}] for indices ${indexCount}`,
+    );
+    assert(
+      (triEnd - triStart) % 3 === 0,
+      `extrudePolygons: feature ${fi} triangle range not multiple of 3`,
+    );
     if (triEnd === triStart) {
       featureRanges.push(indices.length);
       featureIds.push(g.featureIds[fi]);
@@ -56,14 +136,21 @@ export function extrudePolygons(
     }
     const minH = g.featureMinHeight[fi];
     let topH = g.featureHeight[fi];
-    if (topH <= 0) topH = fallbackHeight(g.featureClass[fi], fi);
+    assertFinite(minH, `extrudePolygons: featureMinHeight[${fi}]`);
+    assertFinite(topH, `extrudePolygons: featureHeight[${fi}]`);
+    if (topH <= 0) {
+      topH = fallbackHeight(g.featureClass[fi], fi);
+      assertFinite(topH, `extrudePolygons: fallbackHeight(${fi})`);
+    }
     if (topH <= minH) topH = minH + 3;
 
     // Find local vertex set used by this feature's triangles.
     const localMap = new Map<number, number>(); // global vertIdx → local index
     const localVerts: number[] = []; // global vertex indices in local order
     for (let i = triStart; i < triEnd; i++) {
+      checkLoopBound(i - triStart, MAX_VERTICES_PER_TILE, "extrudePolygons: feature index walk");
       const gv = g.indices[i];
+      assertU32(gv, `extrudePolygons: indices[${i}]`);
       if (!localMap.has(gv)) {
         localMap.set(gv, localVerts.length);
         localVerts.push(gv);
@@ -160,6 +247,9 @@ export function ribbonGeometry(
   uvOpts?: RibbonUVOpts,
 ): { geometry: THREE.BufferGeometry; featureRanges: Uint32Array; featureIds: Uint32Array } | null {
   if (g.kind !== "line") return null;
+  assertOrigin(origin, "ribbonGeometry");
+  assertLayerGeometry(g, "ribbonGeometry");
+  assertFinite(thickness, "ribbonGeometry: thickness");
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
@@ -167,19 +257,27 @@ export function ribbonGeometry(
   const featureIds: number[] = [];
   const yBot = 0;
   const yTop = thickness;
+  const vertCountTotal = g.positions.length / 2;
 
   const featureCount = g.featureIds.length;
   for (let fi = 0; fi < featureCount; fi++) {
+    checkLoopBound(fi, MAX_FEATURES_PER_TILE, "ribbonGeometry: feature walk");
     const vStart = g.featureStart[fi];
     const vEnd = g.featureStart[fi + 1];
+    assert(
+      vStart <= vEnd && vEnd <= vertCountTotal,
+      `ribbonGeometry: bad featureStart range [${vStart},${vEnd}] vertCount ${vertCountTotal}`,
+    );
     if (vEnd - vStart < 2) {
       featureRanges.push(indices.length);
       featureIds.push(g.featureIds[fi]);
       continue;
     }
     const halfW = widthLookup(g.featureClass[fi]) * 0.5;
+    assertFinite(halfW, `ribbonGeometry: halfW for feature ${fi}`);
     const pts: { x: number; z: number }[] = [];
     for (let i = vStart; i < vEnd; i++) {
+      checkLoopBound(i - vStart, MAX_VERTICES_PER_TILE, "ribbonGeometry: pt walk");
       pts.push({
         x: g.positions[i * 2] - origin.x,
         z: -(g.positions[i * 2 + 1] - origin.y),

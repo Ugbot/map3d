@@ -7,6 +7,7 @@
 
 import * as THREE from "three";
 import { MeshStandardNodeMaterial } from "three/webgpu";
+import { assertFinite, assertInRange } from "@map3d/data-core";
 
 export interface GlowMaterialOptions {
   baseColor: THREE.ColorRepresentation;
@@ -24,6 +25,12 @@ export interface GlowMaterialOptions {
 }
 
 export function makeGlowMaterial(opts: GlowMaterialOptions): MeshStandardNodeMaterial {
+  if (opts.emissiveIntensity !== undefined) {
+    assertFinite(opts.emissiveIntensity, "makeGlowMaterial: emissiveIntensity");
+  }
+  if (opts.metalness !== undefined) assertInRange(opts.metalness, 0, 1, "makeGlowMaterial: metalness");
+  if (opts.roughness !== undefined) assertInRange(opts.roughness, 0, 1, "makeGlowMaterial: roughness");
+  if (opts.opacity !== undefined) assertInRange(opts.opacity, 0, 1, "makeGlowMaterial: opacity");
   const offset = opts.polygonOffsetFactor !== undefined || opts.polygonOffsetUnits !== undefined;
   return new MeshStandardNodeMaterial({
     color: opts.baseColor,

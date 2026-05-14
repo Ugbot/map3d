@@ -32,10 +32,12 @@ EMSCRIPTEN_KEEPALIVE void beam_end_frame(void);
 EMSCRIPTEN_KEEPALIVE void beam_agent_upsert(uint32_t remote_id, uint8_t kind,
     float x, float y, float z, float heading);
 EMSCRIPTEN_KEEPALIVE void beam_agent_remove(uint32_t remote_id);
+EMSCRIPTEN_KEEPALIVE void beam_agent_remove_kind(uint32_t remote_id, uint8_t kind);
 
 EMSCRIPTEN_KEEPALIVE void beam_feed_upsert(uint32_t remote_id, uint8_t kind,
     float x, float y, float z, float heading);
 EMSCRIPTEN_KEEPALIVE void beam_feed_remove(uint32_t remote_id);
+EMSCRIPTEN_KEEPALIVE void beam_feed_remove_kind(uint32_t remote_id, uint8_t kind);
 
 EMSCRIPTEN_KEEPALIVE void beam_set_env(float sun_altitude, float sun_azimuth,
     uint32_t sun_color_rgb, uint32_t ambient_sky_rgb, uint32_t ambient_ground_rgb);

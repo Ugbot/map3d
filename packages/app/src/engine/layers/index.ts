@@ -21,6 +21,7 @@ import {
   RAIL_SIDE_UV,
 } from "./roadTextures";
 import type { RibbonConfig } from "../../workers/ribbonGen";
+import { assertFinite } from "@map3d/data-core";
 import type { Layer } from "../Layer";
 import type { LayerName } from "../../cache/types";
 
@@ -37,6 +38,7 @@ const Y_ROADS = 3.0;
 const Y_RAIL = 4.0;
 
 export function createAllLayers(_centerLat: number): Record<LayerName, Layer> {
+  assertFinite(_centerLat, "createAllLayers: centerLat");
   return {
     earth: new PolygonLayer({
       // Neutral dark warm-grey so light grey roads always pop. The biome
