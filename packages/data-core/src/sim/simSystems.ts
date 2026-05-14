@@ -40,10 +40,22 @@ const KIND_SPEED: Record<AgentKindCode, number> = {
   [KIND_AGENT_PEDESTRIAN]: 1.6,
 };
 
+// Vehicles dominate visually — we want them dense enough that the eye reads
+// "traffic" rather than "a car here and there". Pedestrians stay at modest
+// density (perf + clarity). Trains rare by definition.
 const KIND_TARGET_PER_PATH: Record<AgentKindCode, number> = {
-  [KIND_AGENT_VEHICLE]: 3.0,
+  [KIND_AGENT_VEHICLE]: 8.0,
   [KIND_AGENT_TRAIN]: 1.5,
   [KIND_AGENT_PEDESTRIAN]: 3.0,
+};
+
+// Fraction of the world's entityCap each agent kind can claim. Vehicles get
+// the lion's share; trains a token slice; pedestrians a moderate one. Sum is
+// 0.85, leaving slack for live feed entities (aircraft, vessels).
+const KIND_ENTITY_CAP_FRACTION: Record<AgentKindCode, number> = {
+  [KIND_AGENT_VEHICLE]: 0.6,
+  [KIND_AGENT_TRAIN]: 0.05,
+  [KIND_AGENT_PEDESTRIAN]: 0.2,
 };
 
 const KIND_LAYER: Record<AgentKindCode, "roads" | "rail" | "paths"> = {
@@ -176,11 +188,9 @@ function spawnAgentsForKind(
     if (p && p.kindCode === kind) pathCount++;
   }
   if (pathCount === 0) return;
-  // Sim agents share the world with feed entities; cap per-kind so the three
-  // agent kinds together can't exceed ~75% of entityCap (leaving headroom for
-  // aircraft/vessels). With three kinds, a quarter of entityCap each is a
-  // reasonable upper bound.
-  const perKindCap = Math.floor(world.context.config.entityCap / 4);
+  const perKindCap = Math.floor(
+    world.context.config.entityCap * KIND_ENTITY_CAP_FRACTION[kind],
+  );
   const rawTarget = override ?? Math.floor(pathCount * KIND_TARGET_PER_PATH[kind]);
   const target = Math.min(rawTarget, perKindCap);
   let active = 0;
@@ -248,7 +258,13 @@ export function simUpdateSystem(world: Map3dWorld, dt: number): void {
   for (const eid of query(world, [PathRef])) {
     checkLoopBound(iter++, guard, "simUpdate");
     const idx = PathRef.polylineIdx[eid];
-    if (idx < 0) continue;
+    if (idx < 0) {
+      // Slot is idle (e.g. its polyline was evicted last frame, or it never
+      // got one at spawn because no paths of this kind existed yet). Bring it
+      // back so the world doesn't slowly drain over time.
+      respawnAgent(world, eid, Kind.value[eid] as AgentKindCode);
+      continue;
+    }
     let p = ctx.polylines[idx];
     if (!p) {
       // Polyline gone — respawn.

@@ -48,10 +48,22 @@ const KIND_DAY_EMISSIVE: Record<KindCode, number> = {
   [KIND_AGENT_PEDESTRIAN]: 0.1,
 };
 
+// Y offset of the ribbon top surface for the road / rail / path layer the
+// agent lives on. Vehicles ride on the road ribbon, trains on the rail
+// ribbon, pedestrians on the path ribbon. Numbers mirror Y_ROADS+thickness
+// etc. in engine/layers/index.ts. The agent's box centre lands at
+// `surfaceY + halfHeight` so the wheels sit on the asphalt.
+const KIND_SURFACE_Y: Record<KindCode, number> = {
+  [KIND_AGENT_VEHICLE]: 3.0 + 1.2,
+  [KIND_AGENT_TRAIN]: 4.0 + 1.6,
+  [KIND_AGENT_PEDESTRIAN]: 2.5 + 0.6,
+};
+
 interface KindSlot {
   mesh: THREE.InstancedMesh;
   material: MeshStandardNodeMaterial;
   halfHeight: number;
+  surfaceY: number;
 }
 
 export class SimRenderer {
@@ -78,7 +90,12 @@ export class SimRenderer {
       mesh.frustumCulled = false;
       mesh.name = `sim:${kind}`;
       scene.add(mesh);
-      slots[kind] = { mesh, material: mat, halfHeight: sy / 2 };
+      slots[kind] = {
+        mesh,
+        material: mat,
+        halfHeight: sy / 2,
+        surfaceY: KIND_SURFACE_Y[kind],
+      };
     }
     this.slots = slots;
   }
@@ -102,7 +119,11 @@ export class SimRenderer {
       if (!slot) continue;
       const idx = counts[kind];
       if (idx >= slot.mesh.instanceMatrix.count) continue;
-      this.dummy.position.set(Position.x[eid], slot.halfHeight, Position.z[eid]);
+      this.dummy.position.set(
+        Position.x[eid],
+        slot.surfaceY + slot.halfHeight,
+        Position.z[eid],
+      );
       this.dummy.rotation.set(0, Heading.angle[eid], 0);
       this.dummy.updateMatrix();
       slot.mesh.setMatrixAt(idx, this.dummy.matrix);
