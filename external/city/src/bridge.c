@@ -443,6 +443,27 @@ void beam_set_env(float sun_altitude, float sun_azimuth,
     });
 }
 
+/* Internal C-only accessor — NOT exposed via EMSCRIPTEN_KEEPALIVE. Lets the
+ * sokol renderer read the current sun/ambient state without re-implementing
+ * the ecs_singleton lookup against BeamEnv's static component id. Returns 1
+ * if the singleton carries data, 0 if the bridge has not been imported or
+ * beam_set_env() has not been called. Output parameters are untouched on
+ * the failure path so the caller can leave its own defaults in place. */
+int beam_env_read(float *sun_altitude, float *sun_azimuth,
+    uint32_t *sun_color_rgb, uint32_t *ambient_sky_rgb,
+    uint32_t *ambient_ground_rgb)
+{
+    if (!s_world || !s_env_singleton) return 0;
+    const BeamEnv *env = ecs_get(s_world, s_env_singleton, BeamEnv);
+    if (!env) return 0;
+    if (sun_altitude)      *sun_altitude      = env->sun_altitude;
+    if (sun_azimuth)       *sun_azimuth       = env->sun_azimuth;
+    if (sun_color_rgb)     *sun_color_rgb     = env->sun_color_rgb;
+    if (ambient_sky_rgb)   *ambient_sky_rgb   = env->ambient_sky_rgb;
+    if (ambient_ground_rgb)*ambient_ground_rgb= env->ambient_ground_rgb;
+    return 1;
+}
+
 void beam_clear_all(void) {
     ecs_assert(s_world != NULL, ECS_INVALID_OPERATION, NULL);
 

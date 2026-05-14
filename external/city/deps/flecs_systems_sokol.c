@@ -31791,16 +31791,21 @@ static void sokol_draw_beam_meshes(
     }
 }
 
-/* Resolve the active BeamEnv singleton (registered by FlecsCityBridgeImport)
- * via name lookup so this TU doesn't need to link against bridge.c's static
- * component-id. Falls back to a daylight default if the bridge hasn't been
- * imported or beam_set_env() hasn't been called yet. */
+/* Defined in src/bridge.c — pulls the active BeamEnv singleton. Declared
+ * extern here so the renderer doesn't need bridge.c's static component-id. */
+extern int beam_env_read(float *sun_altitude, float *sun_azimuth,
+    uint32_t *sun_color_rgb, uint32_t *ambient_sky_rgb,
+    uint32_t *ambient_ground_rgb);
+
+/* Resolve sun direction + colour + ambient for the BeamMesh draw. Falls back
+ * to a daylight default if the bridge has not yet pushed an env update. */
 static void beam_mesh_resolve_env(
     ecs_world_t *world,
     vec3 sun_dir_out,
     vec3 sun_col_out,
     vec3 ambient_out)
 {
+    (void)world;
     /* Default: sun roughly south-up, neutral white, mild grey ambient. */
     vec3 def_dir = { 0.3f, 0.9f, 0.2f };
     glm_vec3_normalize(def_dir);
@@ -31808,38 +31813,29 @@ static void beam_mesh_resolve_env(
     glm_vec3_copy((vec3){ 1.0f, 1.0f, 1.0f }, sun_col_out);
     glm_vec3_copy((vec3){ 0.25f, 0.25f, 0.28f }, ambient_out);
 
-    ecs_entity_t env_comp = ecs_lookup(world, "bridge.BeamEnv");
-    if (!env_comp) return;
-    const void *env_ptr = ecs_get_id(world, env_comp, env_comp);
-    if (!env_ptr) return;
+    float alt = 0, az = 0;
+    uint32_t sun_rgb = 0, sky_rgb = 0, ground_rgb = 0;
+    if (!beam_env_read(&alt, &az, &sun_rgb, &sky_rgb, &ground_rgb)) {
+        return;
+    }
 
-    /* Mirror of bridge.c's anonymous BeamEnv struct. Order MUST match. */
-    struct beam_env_view {
-        float sun_altitude;
-        float sun_azimuth;
-        uint32_t sun_color_rgb;
-        uint32_t ambient_sky_rgb;
-        uint32_t ambient_ground_rgb;
-    };
-    const struct beam_env_view *env = (const struct beam_env_view*)env_ptr;
-
-    float ca = cosf(env->sun_altitude);
-    float sa = sinf(env->sun_altitude);
-    float cz = cosf(env->sun_azimuth);
-    float sz = sinf(env->sun_azimuth);
+    float ca = cosf(alt);
+    float sa = sinf(alt);
+    float cz = cosf(az);
+    float sz = sinf(az);
     sun_dir_out[0] = ca * sz;
     sun_dir_out[1] = sa;
     sun_dir_out[2] = ca * cz;
     glm_vec3_normalize(sun_dir_out);
 
     const float inv = 1.0f / 255.0f;
-    sun_col_out[0] = (float)((env->sun_color_rgb >> 16) & 0xFFu) * inv;
-    sun_col_out[1] = (float)((env->sun_color_rgb >>  8) & 0xFFu) * inv;
-    sun_col_out[2] = (float)((env->sun_color_rgb      ) & 0xFFu) * inv;
+    sun_col_out[0] = (float)((sun_rgb >> 16) & 0xFFu) * inv;
+    sun_col_out[1] = (float)((sun_rgb >>  8) & 0xFFu) * inv;
+    sun_col_out[2] = (float)((sun_rgb      ) & 0xFFu) * inv;
 
-    ambient_out[0] = (float)((env->ambient_sky_rgb >> 16) & 0xFFu) * inv;
-    ambient_out[1] = (float)((env->ambient_sky_rgb >>  8) & 0xFFu) * inv;
-    ambient_out[2] = (float)((env->ambient_sky_rgb      ) & 0xFFu) * inv;
+    ambient_out[0] = (float)((sky_rgb >> 16) & 0xFFu) * inv;
+    ambient_out[1] = (float)((sky_rgb >>  8) & 0xFFu) * inv;
+    ambient_out[2] = (float)((sky_rgb      ) & 0xFFu) * inv;
 }
 
 void sokol_run_scene_pass(
