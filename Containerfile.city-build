@@ -7,11 +7,11 @@ FROM docker.io/library/debian:bookworm-slim AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     EMSDK=/opt/emsdk \
-    PATH=/opt/emsdk:/opt/emsdk/upstream/emscripten:/opt/bake/bake:$PATH
+    PATH=/usr/local/bin:/opt/emsdk:/opt/emsdk/upstream/emscripten:/opt/bake:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3 build-essential cmake \
-        bash xz-utils unzip pkg-config \
+        bash xz-utils unzip pkg-config sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # --- emsdk ----------------------------------------------------------------
@@ -22,14 +22,22 @@ RUN git clone --depth 1 https://github.com/emscripten-core/emsdk.git /opt/emsdk 
  && ./emsdk activate ${EMSDK_VERSION}
 
 # --- bake -----------------------------------------------------------------
+# bake's setup.sh tries `sudo mkdir -p /usr/local/bin` even in --local mode;
+# we install sudo above so it succeeds and the global symlink lands. The
+# binary itself ends up at /opt/bake/bake/bake_Linux/bake.
+# bake's setup.sh builds + installs drivers/libraries into ~/bake (i.e.
+# /root/bake) and a global symlink in /usr/local/bin. We use BAKE_HOME above
+# to point at /root/bake so bake's runtime can locate bake.lang.c etc.
 RUN git clone --depth 1 https://github.com/SanderMertens/bake.git /opt/bake \
  && cd /opt/bake \
- && ./setup.sh --local
+ && ./setup.sh \
+ && test -x /usr/local/bin/bake \
+ && bake --version
 
 # Drop into bash with the emsdk env sourced. bake builds invoke emcc via
 # the activated emsdk environment.
-ENV BAKE_HOME=/opt/bake \
-    BAKE_TARGET=/opt/bake/target
+ENV BAKE_HOME=/root/bake \
+    BAKE_TARGET=/root/bake
 
 WORKDIR /work
 SHELL ["/bin/bash", "-lc"]

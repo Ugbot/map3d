@@ -27,4 +27,4 @@ podman run --rm \
   -v "$repo_root:/work:Z" \
   -w /work \
   "$image" \
-  bash -lc "scripts/build-city-wasm.sh"
+  "source /opt/emsdk/emsdk_env.sh >/dev/null && bash scripts/build-city-wasm.sh"

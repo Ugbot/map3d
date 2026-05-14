@@ -52,8 +52,11 @@ export interface EngineConfig {
   onProgress?: (loaded: number, inflight: number) => void;
 }
 
-const WORLD_ENTITY_CAP = 8192;
-const WORLD_POLYLINE_CAP = 4096;
+const WORLD_ENTITY_CAP = 32_768;
+// Each MVT tile contributes hundreds of road/rail/path polylines; with ~120
+// loaded tiles in the ring we need headroom. The polyline slab is recycled
+// on tile release, so this is a steady-state cap, not a high-water mark.
+const WORLD_POLYLINE_CAP = 131_072;
 const WORLD_FEED_STALE_MS = 5 * 60 * 1000;
 const WORLD_SEED = 0xc0ffee;
 
@@ -244,7 +247,10 @@ export class Engine {
     await this.tiles.init();
     this.last = performance.now();
     const loop = (now: number) => {
-      const dt = Math.min(0.1, (now - this.last) / 1000);
+      // performance.now() can drift backwards a few microseconds across
+      // frames on some platforms; clamp to [0, 0.1s] so simUpdateSystem's
+      // dt invariant holds without producing visible time travel.
+      const dt = Math.min(0.1, Math.max(0, (now - this.last) / 1000));
       this.last = now;
       this.timeSec += dt;
       this.keyboard.update(dt);

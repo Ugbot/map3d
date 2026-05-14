@@ -16,8 +16,13 @@ export class AssertionError extends Error {
   }
 }
 
-const NDEBUG =
-  typeof process !== "undefined" && process.env?.DATA_CORE_NDEBUG === "1";
+const NDEBUG = (() => {
+  // Browser builds don't see `process`; Node + Vite-defined envs do. Read
+  // through globalThis so the check works in either environment without
+  // requiring @types/node in consumers.
+  const g = globalThis as { process?: { env?: Record<string, string | undefined> } };
+  return g.process?.env?.DATA_CORE_NDEBUG === "1";
+})();
 
 export function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new AssertionError(msg);

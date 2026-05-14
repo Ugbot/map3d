@@ -40,7 +40,7 @@ interface ServerState {
 function start(): ServerState {
   const world = createMap3dWorld({
     entityCap: ENTITY_CAP,
-    polylineCap: 4096,
+    polylineCap: 131_072,
     feedStaleMs: 5 * 60 * 1000,
     seed: 0xc0ffee,
   });
@@ -99,7 +99,7 @@ function start(): ServerState {
 
 function tick(state: ServerState): void {
   const now = Date.now();
-  const dt = Math.min(0.25, (now - state.lastTickMs) / 1000);
+  const dt = Math.min(0.25, Math.max(0, (now - state.lastTickMs) / 1000));
   state.lastTickMs = now;
   simUpdateSystem(state.world, dt);
   feedExpireSystem(state.world, now);

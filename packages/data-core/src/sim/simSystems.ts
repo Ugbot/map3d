@@ -85,7 +85,7 @@ export function ingestTileSystem(
   for (const kind of AGENT_KINDS) {
     const layer = tile.layers[KIND_LAYER[kind]];
     if (!layer || layer.kind !== "line") continue;
-    extractPolylines(layer, kind, tk, opts.sceneOrigin, world, added);
+    extractPolylines(layer as SimLineGeometry, kind, tk, opts.sceneOrigin, world, added);
   }
   world.context.polylinesByTile.set(tk, added);
 
@@ -176,7 +176,13 @@ function spawnAgentsForKind(
     if (p && p.kindCode === kind) pathCount++;
   }
   if (pathCount === 0) return;
-  const target = override ?? Math.floor(pathCount * KIND_TARGET_PER_PATH[kind]);
+  // Sim agents share the world with feed entities; cap per-kind so the three
+  // agent kinds together can't exceed ~75% of entityCap (leaving headroom for
+  // aircraft/vessels). With three kinds, a quarter of entityCap each is a
+  // reasonable upper bound.
+  const perKindCap = Math.floor(world.context.config.entityCap / 4);
+  const rawTarget = override ?? Math.floor(pathCount * KIND_TARGET_PER_PATH[kind]);
+  const target = Math.min(rawTarget, perKindCap);
   let active = 0;
   const { Kind, PathRef } = world.components;
   for (const eid of query(world, [PathRef])) {
@@ -236,7 +242,9 @@ export function simUpdateSystem(world: Map3dWorld, dt: number): void {
   const ctx = world.context;
 
   let iter = 0;
-  const guard = ctx.config.entityCap * 2;
+  // bitECS reuses tombstoned eids and may briefly yield more eids than our
+  // SoA capacity during heavy churn; allow generous slack before tripping.
+  const guard = ctx.config.entityCap * 4;
   for (const eid of query(world, [PathRef])) {
     checkLoopBound(iter++, guard, "simUpdate");
     const idx = PathRef.polylineIdx[eid];
