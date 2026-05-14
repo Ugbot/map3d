@@ -157,6 +157,23 @@ export class FlecsBridge {
   private _lanternUpsert!: V_lantern;
   private _propUpsert!: V_prop;
 
+  // Camera + stats.
+  private _setCamera!: (
+    x: number, y: number, z: number, yaw: number, pitch: number,
+  ) => void;
+  private _cameraRotateDelta!: (dyaw: number, dpitch: number) => void;
+  private _worldInfo!: (outPtr: number) => void;
+  private _worldInfoBuf = 0; // heap ptr, allocated lazily
+
+  // Running totals for the stats HUD. Reset on init() / clearAll().
+  totalTilesBegun = 0;
+  totalTilesReleased = 0;
+  totalBuildings = 0;
+  totalMeshes = 0;
+  totalLanterns = 0;
+  totalProps = 0;
+  private lastLogMs = 0;
+
   // remote_id allocation. The server emits ids that are unique within a tile;
   // we further partition by family so building/mesh/lantern/prop spaces don't
   // collide on the bridge side.
@@ -280,10 +297,74 @@ export class FlecsBridge {
       "number",
     ]) as V_prop;
 
+    this._setCamera = cw("beam_set_camera", null, [
+      "number",
+      "number",
+      "number",
+      "number",
+      "number",
+    ]) as (x: number, y: number, z: number, yaw: number, pitch: number) => void;
+    this._cameraRotateDelta = cw("beam_camera_rotate_delta", null, [
+      "number",
+      "number",
+    ]) as (dyaw: number, dpitch: number) => void;
+    this._worldInfo = cw("beam_world_info", null, ["number"]) as (
+      ptr: number,
+    ) => void;
+
     this._init();
     this.prevAgentCount.fill(0);
     this.liveFeedIds.clear();
     this.liveTiles.clear();
+    this.resetCounters();
+  }
+
+  private resetCounters(): void {
+    this.totalTilesBegun = 0;
+    this.totalTilesReleased = 0;
+    this.totalBuildings = 0;
+    this.totalMeshes = 0;
+    this.totalLanterns = 0;
+    this.totalProps = 0;
+    this.framesApplied = 0;
+    this.lastTickSeq = 0;
+    this.lastFrameKind = 0;
+  }
+
+  /** Place the camera absolutely (e.g. on origin change). yaw + pitch in rad. */
+  setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void {
+    assertFinite(x, "cam x"); assertFinite(y, "cam y"); assertFinite(z, "cam z");
+    assertFinite(yaw, "yaw"); assertFinite(pitch, "pitch");
+    this._setCamera(x, y, z, yaw, pitch);
+  }
+
+  /** Mouse-drag look: incremental yaw/pitch in radians. */
+  cameraRotateDelta(dyaw: number, dpitch: number): void {
+    if (!Number.isFinite(dyaw) || !Number.isFinite(dpitch)) return;
+    this._cameraRotateDelta(dyaw, dpitch);
+  }
+
+  /** Pull frame_count / delta_time / world_time / entity_count from the world. */
+  worldInfo(): {
+    frameCount: number;
+    deltaTime: number;
+    worldTime: number;
+    entityCount: number;
+  } {
+    assert(this.mod != null, "worldInfo: bridge not initialised");
+    const mod = this.mod;
+    if (this._worldInfoBuf === 0) {
+      this._worldInfoBuf = mod._malloc(16);
+      assert(this._worldInfoBuf !== 0, "worldInfo: _malloc failed");
+    }
+    this._worldInfo(this._worldInfoBuf);
+    const base = this._worldInfoBuf >>> 2;
+    return {
+      frameCount: mod.HEAPF32[base + 0] | 0,
+      deltaTime: mod.HEAPF32[base + 1],
+      worldTime: mod.HEAPF32[base + 2],
+      entityCount: mod.HEAPF32[base + 3] | 0,
+    };
   }
 
   beginFrame(tickSeq: number): void {
@@ -464,6 +545,7 @@ export class FlecsBridge {
     // Track which agent-kinds appeared so we know which to reap-tail.
     const seenAgentKind: boolean[] = [false, false, false];
     const newAgentCount = new Uint32Array(AGENT_KIND_COUNT);
+    let tileSectionsThisFrame = 0;
 
     dec.forEachSection((type, payload, _bytes) => {
       if (type === SECTION_AGENTS) {
@@ -530,12 +612,17 @@ export class FlecsBridge {
         const k = readTileBegin(payload);
         this._tileBegin(k.z, k.x, k.y);
         this.liveTiles.add(`${k.z}/${k.x}/${k.y}`);
+        this.totalTilesBegun++;
+        tileSectionsThisFrame++;
       } else if (type === SECTION_TILE_END) {
         this._tileEnd();
+        tileSectionsThisFrame++;
       } else if (type === SECTION_TILE_RELEASE) {
         const k = readTileRelease(payload);
         this._tileRelease(k.z, k.x, k.y);
         this.liveTiles.delete(`${k.z}/${k.x}/${k.y}`);
+        this.totalTilesReleased++;
+        tileSectionsThisFrame++;
       } else if (type === SECTION_TILE_BUILDINGS) {
         const recs = readTileBuildings(payload);
         for (let i = 0; i < recs.length; i++) {
@@ -553,8 +640,12 @@ export class FlecsBridge {
             r.color >>> 0,
           );
         }
+        this.totalBuildings += recs.length;
+        tileSectionsThisFrame++;
       } else if (type === SECTION_TILE_MESH) {
         this.uploadMesh(readTileMesh(payload));
+        this.totalMeshes++;
+        tileSectionsThisFrame++;
       } else if (type === SECTION_TILE_LANTERNS) {
         const recs = readTileLanterns(payload);
         for (let i = 0; i < recs.length; i++) {
@@ -566,6 +657,8 @@ export class FlecsBridge {
             r.z,
           );
         }
+        this.totalLanterns += recs.length;
+        tileSectionsThisFrame++;
       } else if (type === SECTION_TILE_PROPS) {
         const recs = readTileProps(payload);
         for (let i = 0; i < recs.length; i++) {
@@ -579,6 +672,8 @@ export class FlecsBridge {
             r.heading,
           );
         }
+        this.totalProps += recs.length;
+        tileSectionsThisFrame++;
       }
       // Unknown sections are ignored — forward compatibility.
     });
@@ -601,5 +696,24 @@ export class FlecsBridge {
     this.framesApplied++;
     this.lastTickSeq = hdr.tickSeq >>> 0;
     this.lastFrameKind = hdr.kind & 0xff;
+
+    // Rate-limited summary log so the user can confirm data is flowing
+    // without flooding the console at 30 Hz.
+    if (tileSectionsThisFrame > 0) {
+      const now = Date.now();
+      if (now - this.lastLogMs > 1000) {
+        this.lastLogMs = now;
+        console.log(
+          "[bridge] frames=%d tiles=%d/%d buildings=%d meshes=%d lanterns=%d props=%d",
+          this.framesApplied,
+          this.totalTilesBegun,
+          this.totalTilesReleased,
+          this.totalBuildings,
+          this.totalMeshes,
+          this.totalLanterns,
+          this.totalProps,
+        );
+      }
+    }
   }
 }

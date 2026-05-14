@@ -86,6 +86,22 @@ EMSCRIPTEN_KEEPALIVE void beam_lantern_upsert(uint32_t remote_id,
 EMSCRIPTEN_KEEPALIVE void beam_prop_upsert(uint32_t remote_id, uint8_t prop_kind,
     float x, float y, float z, float heading);
 
+/* ---- Camera + stats -------------------------------------------------------
+ *
+ * Two ways to drive the camera: absolute placement (used on origin change)
+ * and incremental rotation (used by mouse-drag look in JS). Both mutate the
+ * named `camera` entity declared in app.flecs. Pitch is clamped internally
+ * to [-PI/2 + 0.05, PI/2 - 0.05] so the controller can't gimbal-flip. */
+EMSCRIPTEN_KEEPALIVE void beam_set_camera(float x, float y, float z,
+    float yaw, float pitch);
+EMSCRIPTEN_KEEPALIVE void beam_camera_rotate_delta(float dyaw, float dpitch);
+
+/* Fills a 4-float scratch buffer the caller allocated on the wasm heap.
+ * Slot 0: frame_count_total (cast u32 -> f32). Slot 1: delta_time_total
+ * seconds. Slot 2: world_time_total seconds. Slot 3: live entity count
+ * (cast u32 -> f32). */
+EMSCRIPTEN_KEEPALIVE void beam_world_info(uint32_t out_floats_ptr);
+
 #ifdef __cplusplus
 }
 #endif

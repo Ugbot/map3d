@@ -37,6 +37,8 @@ static ecs_entity_t s_feeds_root = 0;
 static ecs_entity_t s_statics_root = 0;
 static ecs_entity_t s_sun_entity = 0;
 static bool s_sun_missing_logged = false;
+static ecs_entity_t s_camera_entity = 0;
+static bool s_camera_missing_logged = false;
 
 /* BeamTileKey tags every static entity created between beam_tile_begin and
  * beam_tile_end so beam_tile_release can wipe an entire tile in one query. */
@@ -730,3 +732,73 @@ void beam_prop_upsert(uint32_t remote_id, uint8_t prop_kind,
     ecs_set(s_world, e, EcsRotation3, { .x = 0.0f, .y = heading, .z = 0.0f });
 }
 
+/* ---- Camera + stats -------------------------------------------------------
+ *
+ * The camera entity lives in app.flecs as `camera`. The named lookup is
+ * cached so subsequent calls are cheap. CameraController stays on the
+ * entity so WASD/QE/arrow keys still work; these exports just absolute-
+ * or relatively-mutate Position3 / Rotation3. */
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#define BRIDGE_PITCH_LIMIT (1.5208f)   /* M_PI/2 - 0.05 */
+
+static ecs_entity_t bridge_resolve_camera(void) {
+    if (s_camera_entity) return s_camera_entity;
+    s_camera_entity = ecs_lookup(s_world, "camera");
+    if (!s_camera_entity) {
+        if (!s_camera_missing_logged) {
+            ecs_dbg("bridge: 'camera' entity not found yet; "
+                "beam_set_camera / beam_camera_rotate_delta no-op");
+            s_camera_missing_logged = true;
+        }
+    }
+    return s_camera_entity;
+}
+
+void beam_set_camera(float x, float y, float z, float yaw, float pitch) {
+    ecs_assert(s_world != NULL, ECS_INVALID_OPERATION, NULL);
+    ecs_assert(x == x && y == y && z == z && yaw == yaw && pitch == pitch,
+        ECS_INVALID_PARAMETER, "beam_set_camera: NaN input");
+    ecs_entity_t cam = bridge_resolve_camera();
+    if (!cam) return;
+    if (pitch >  BRIDGE_PITCH_LIMIT) pitch =  BRIDGE_PITCH_LIMIT;
+    if (pitch < -BRIDGE_PITCH_LIMIT) pitch = -BRIDGE_PITCH_LIMIT;
+    ecs_set(s_world, cam, EcsPosition3, { .x = x, .y = y, .z = z });
+    ecs_set(s_world, cam, EcsRotation3, { .x = pitch, .y = yaw, .z = 0.0f });
+}
+
+void beam_camera_rotate_delta(float dyaw, float dpitch) {
+    ecs_assert(s_world != NULL, ECS_INVALID_OPERATION, NULL);
+    ecs_assert(dyaw == dyaw && dpitch == dpitch,
+        ECS_INVALID_PARAMETER, "beam_camera_rotate_delta: NaN input");
+    ecs_entity_t cam = bridge_resolve_camera();
+    if (!cam) return;
+    const EcsRotation3 *cur = ecs_get(s_world, cam, EcsRotation3);
+    float yaw   = cur ? cur->y : 0.0f;
+    float pitch = cur ? cur->x : 0.0f;
+    yaw   += dyaw;
+    pitch += dpitch;
+    if (pitch >  BRIDGE_PITCH_LIMIT) pitch =  BRIDGE_PITCH_LIMIT;
+    if (pitch < -BRIDGE_PITCH_LIMIT) pitch = -BRIDGE_PITCH_LIMIT;
+    ecs_set(s_world, cam, EcsRotation3, { .x = pitch, .y = yaw, .z = 0.0f });
+}
+
+void beam_world_info(uint32_t out_floats_ptr) {
+    ecs_assert(s_world != NULL, ECS_INVALID_OPERATION, NULL);
+    ecs_assert(out_floats_ptr != 0, ECS_INVALID_PARAMETER, "null out ptr");
+    /* `out_floats_ptr` is a wasm linear-memory offset. In wasm32 we can
+     * cast it to a host pointer directly. The slot order matches BRIDGE.md /
+     * the FlecsBridge.worldInfo() consumer. */
+    float *out = (float *)(uintptr_t)out_floats_ptr;
+    const ecs_world_info_t *info = ecs_get_world_info(s_world);
+    if (!info) {
+        out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 0.0f;
+        return;
+    }
+    out[0] = (float)(uint32_t)info->frame_count_total;
+    out[1] = (float)info->delta_time;
+    out[2] = (float)info->world_time_total;
+    out[3] = (float)(uint32_t)beam_live_count();
+}

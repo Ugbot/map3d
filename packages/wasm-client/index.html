@@ -112,6 +112,60 @@
         padding: 3px 6px;
         font-size: 10px;
       }
+      #stats-panel {
+        position: fixed;
+        bottom: 12px;
+        right: 12px;
+        padding: 8px 10px;
+        background: rgba(15, 20, 28, 0.85);
+        border: 1px solid #2a3340;
+        border-radius: 6px;
+        font-size: 11px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #d6dbe2;
+        z-index: 10;
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 2px 14px;
+        min-width: 180px;
+      }
+      #stats-panel dt {
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #8a98ad;
+        font-size: 10px;
+      }
+      #stats-panel dd {
+        margin: 0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      #stats-panel dd.warn { color: #d8a738; }
+      #stats-panel dd.bad  { color: #d24a4a; }
+      #stats-panel dd.good { color: #4fbd6e; }
+      #help-panel {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        padding: 8px 10px;
+        background: rgba(15, 20, 28, 0.7);
+        border: 1px solid #2a3340;
+        border-radius: 6px;
+        font-size: 10px;
+        line-height: 1.5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #8a98ad;
+        z-index: 10;
+        pointer-events: none;
+      }
+      #help-panel kbd {
+        background: #1b2532;
+        border: 1px solid #2a3340;
+        border-radius: 3px;
+        padding: 1px 4px;
+        color: #d6dbe2;
+        font-size: 10px;
+      }
     </style>
   </head>
   <body>
@@ -137,6 +191,20 @@
         <button type="button" data-lat="48.8566" data-lon="2.3522" data-name="Paris">Paris</button>
       </div>
     </form>
+    <dl id="stats-panel">
+      <dt>fps</dt>      <dd id="stat-fps">—</dd>
+      <dt>frames</dt>   <dd id="stat-frames">—</dd>
+      <dt>entities</dt> <dd id="stat-entities">—</dd>
+      <dt>tiles</dt>    <dd id="stat-tiles">—</dd>
+      <dt>buildings</dt><dd id="stat-buildings">—</dd>
+      <dt>meshes</dt>   <dd id="stat-meshes">—</dd>
+      <dt>lanterns</dt> <dd id="stat-lanterns">—</dd>
+      <dt>props</dt>    <dd id="stat-props">—</dd>
+      <dt>ws</dt>       <dd id="stat-ws">—</dd>
+    </dl>
+    <div id="help-panel">
+      drag = look · <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Q</kbd><kbd>E</kbd> up/down · arrows rotate
+    </div>
     <script type="module" src="/src/index.ts"></script>
   </body>
 </html>

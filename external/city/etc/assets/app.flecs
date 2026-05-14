@@ -15,13 +15,13 @@ $ {
 
 camera {
   CameraController
-  Position3: {-115, 10.0, -287}
-  Rotation3: {-0.15}
+  Position3: {0, 600, 600}
+  Rotation3: {-0.6, 0, 0}
   Camera: {
-    fov: 20
+    fov: 60
     up: [0, 1, 0]
     near_: 2
-    far_: 1000
+    far_: 5000
   }
 }
 
@@ -39,13 +39,13 @@ canvas {
     ambient_light_ground_falloff: 4.0
     directional_light: light
     camera: camera
-    fog_density: 1.8
-    shadow_far: 300
+    fog_density: 0.4
+    shadow_far: 800
   }
 }
 
 ground_plane {
   Position3: {0, -1.0, 0}
-  Box: {5000, 1.0, 5000}
+  Box: {20000, 1.0, 20000}
   Rgb: {0.11, 0.15, 0.1}
 }

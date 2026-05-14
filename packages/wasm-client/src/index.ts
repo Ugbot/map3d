@@ -163,10 +163,20 @@ async function main(): Promise<void> {
   ws.start();
 
   wireOriginPanel(ws, bridge);
+  wirePointerLook(bridge);
+  wireStatsHud(bridge, ws);
 
   // Expose for ad-hoc poking in devtools. Not a stable API.
   (window as any).__map3d = { ws, bridge, setBbox: (b: Bbox) => ws.setBbox(b) };
 }
+
+/** Camera defaults — bird's-eye over the streamed tile cluster. Keep in sync
+ *  with the values in external/city/etc/assets/app.flecs so a "reset" matches
+ *  the initial WASM camera. */
+const CAM_HOME = { x: 0, y: 600, z: 600, yaw: 0, pitch: -0.6 } as const;
+
+/** Mouse-drag rotation: ~0.17° per CSS pixel. Feels about right for a 60° FOV. */
+const POINTER_RAD_PER_PX = 0.003;
 
 /** Hook up the lat/lon panel: on submit (or preset click) compute a fresh
  *  bbox, wipe the bridge's existing tiles so the previous map doesn't ghost
@@ -185,6 +195,7 @@ function wireOriginPanel(ws: WsClient, bridge: FlecsBridge | null): void {
     lonIn.value = lon.toFixed(4);
     if (info != null) info.textContent = name ?? `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
     bridge?.releaseAllTiles();
+    bridge?.setCamera(CAM_HOME.x, CAM_HOME.y, CAM_HOME.z, CAM_HOME.yaw, CAM_HOME.pitch);
     ws.setBbox(bboxAround(lat, lon));
   };
 
@@ -204,6 +215,128 @@ function wireOriginPanel(ws: WsClient, bridge: FlecsBridge | null): void {
       apply(lat, lon, name);
     });
   }
+}
+
+/** Mouse-drag look. The Flecs CameraController already handles WASD/QE/
+ *  arrows via sokol_app's keyboard hooks; pointer events are not wired into
+ *  EcsInput on the C side, so we drive rotation directly through the bridge. */
+function wirePointerLook(bridge: FlecsBridge | null): void {
+  if (bridge == null) return;
+  const canvas = document.getElementById("canvas");
+  if (!(canvas instanceof HTMLCanvasElement)) return;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  canvas.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return; // left only
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.focus();
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    // Yaw left+ = look right, pitch up+ = look down — match flecs.game's
+    // convention where Rotation3.x is pitch and Rotation3.y is yaw.
+    bridge.cameraRotateDelta(-dx * POINTER_RAD_PER_PX, -dy * POINTER_RAD_PER_PX);
+  });
+  const endDrag = (e: PointerEvent): void => {
+    if (!dragging) return;
+    dragging = false;
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {
+      // already released — ignore
+    }
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+/** Stats panel + 5s console summary. Driven by requestAnimationFrame for
+ *  smooth FPS; bridge.worldInfo() is polled once per second for the C-side
+ *  frame_count and entity_count. */
+function wireStatsHud(bridge: FlecsBridge | null, ws: WsClient): void {
+  const $ = (id: string) => document.getElementById(id);
+  const elFps = $("stat-fps");
+  const elFrames = $("stat-frames");
+  const elEntities = $("stat-entities");
+  const elTiles = $("stat-tiles");
+  const elBuildings = $("stat-buildings");
+  const elMeshes = $("stat-meshes");
+  const elLanterns = $("stat-lanterns");
+  const elProps = $("stat-props");
+  const elWs = $("stat-ws");
+
+  let lastRafMs = performance.now();
+  let emaFps = 0;          // exponential moving average over ~1 s
+  let lastInfoPollMs = 0;
+  let lastConsoleMs = 0;
+  let bridgeFrames = 0;
+  let bridgeEntities = 0;
+
+  const fmt = (n: number): string => {
+    if (!Number.isFinite(n)) return "—";
+    if (n >= 10_000) return n.toLocaleString();
+    return String(n);
+  };
+
+  const setText = (el: Element | null, text: string): void => {
+    if (el == null) return;
+    if (el.textContent !== text) el.textContent = text;
+  };
+
+  const tick = (nowMs: number): void => {
+    const dt = Math.max(1, nowMs - lastRafMs);
+    lastRafMs = nowMs;
+    const instFps = 1000 / dt;
+    // First sample seeds the average; afterwards smooth with α tuned to ~1 s.
+    const alpha = Math.min(0.2, dt / 1000);
+    emaFps = emaFps > 0 ? emaFps + alpha * (instFps - emaFps) : instFps;
+
+    if (bridge != null && nowMs - lastInfoPollMs > 500) {
+      lastInfoPollMs = nowMs;
+      try {
+        const info = bridge.worldInfo();
+        bridgeFrames = info.frameCount;
+        bridgeEntities = info.entityCount;
+      } catch {
+        // bridge not ready yet
+      }
+    }
+
+    setText(elFps, emaFps.toFixed(1));
+    setText(elFrames, fmt(bridge ? bridgeFrames : 0));
+    setText(elEntities, fmt(bridge ? bridgeEntities : 0));
+    setText(elTiles, bridge ? `${bridge.totalTilesBegun}` : "0");
+    setText(elBuildings, fmt(bridge?.totalBuildings ?? 0));
+    setText(elMeshes, fmt(bridge?.totalMeshes ?? 0));
+    setText(elLanterns, fmt(bridge?.totalLanterns ?? 0));
+    setText(elProps, fmt(bridge?.totalProps ?? 0));
+    setText(elWs, ws.getState());
+
+    if (nowMs - lastConsoleMs > 5000) {
+      lastConsoleMs = nowMs;
+      console.log(
+        "[stats] fps=%s frames=%s entities=%s tiles=%s buildings=%s meshes=%s ws=%s",
+        emaFps.toFixed(1),
+        fmt(bridgeFrames),
+        fmt(bridgeEntities),
+        bridge ? bridge.totalTilesBegun : 0,
+        fmt(bridge?.totalBuildings ?? 0),
+        fmt(bridge?.totalMeshes ?? 0),
+        ws.getState(),
+      );
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 main().catch((err) => {
