@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
+*.tsbuildinfo
 
 # Flecs/WASM build artefacts (produced by scripts/build-city-wasm.sh)
 external/city/.bake_cache
