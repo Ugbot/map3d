@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { LayerName } from "../cache/types";
+import type { LayerName } from "@map3d/data-core";
 
 export interface LayerState {
   visible: boolean;

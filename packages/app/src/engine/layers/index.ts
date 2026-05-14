@@ -11,7 +11,7 @@ import {
   RailWidthM,
   PathWidthM,
   WaterwayWidthM,
-} from "../../cache/classes";
+} from "@map3d/data-core";
 import {
   roadTexture,
   ROAD_TEXTURE_LENGTH_M,
@@ -20,10 +20,8 @@ import {
   RAIL_TEXTURE_LENGTH_M,
   RAIL_SIDE_UV,
 } from "./roadTextures";
-import type { RibbonConfig } from "../../workers/ribbonGen";
-import { assertFinite } from "@map3d/data-core";
+import { assertFinite, type RibbonConfig, type LayerName } from "@map3d/data-core";
 import type { Layer } from "../Layer";
-import type { LayerName } from "../../cache/types";
 
 // Physical Y stack — 0.5 m steps, big enough that the depth buffer can
 // resolve them even at very oblique camera angles. Polygon offset is gone;

@@ -1,6 +1,9 @@
-/// <reference lib="webworker" />
+// Pure MVT tile parser. Runs synchronously, no DOM, no worker globals — usable
+// from a browser Worker (via tileWorker.entry.ts) or a Node.js process (the
+// data-server). Decodes the pbf, classifies features through the provided
+// Schema, projects into Web Mercator metres, and emits SoA buffers in the
+// shape the renderer consumes.
 
-import { PMTiles } from "pmtiles";
 import { VectorTile } from "@mapbox/vector-tile";
 import Pbf from "pbf";
 import earcut from "earcut";
@@ -11,20 +14,16 @@ import {
   assertFinite,
   assertInRange,
   checkLoopBound,
-} from "@map3d/data-core";
+} from "../util/assert";
 import {
   tileMetersBox,
   tileLocalToMeters,
   type MetersBox,
 } from "../projection/mercator";
-import type { BakedLineMesh, LayerGeometry, LayerName, ParsedTile } from "../cache/types";
-import type { WorkerRequest, WorkerResponse } from "./pool";
+import type { LayerGeometry, LayerName, ParsedTile } from "./types";
 import type { Schema } from "./schemas/types";
 import { protomapsV4 } from "./schemas/protomapsV4";
 import { openmaptiles } from "./schemas/openmaptiles";
-import { bakeRibbonMesh, type RibbonConfig } from "./ribbonGen";
-
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Tiger Style hard caps. These are sanity bounds on *untrusted tile bytes*;
@@ -38,44 +37,20 @@ const MAX_RINGS_PER_FEATURE = 65_536;
 const MAX_POINTS_PER_RING = 1_000_000;
 const MAX_TILE_ZOOM = 24;
 
-// ────────────────────────────────────────────────────────────────────────────
-// Tile sources
-// ────────────────────────────────────────────────────────────────────────────
-interface TileSource {
-  getTile(z: number, x: number, y: number): Promise<ArrayBuffer | undefined>;
-}
+export type SchemaName = "openmaptiles" | "protomaps-v4";
+export type SourceKind = "pmtiles" | "raw";
 
-class PMTilesSource implements TileSource {
-  private p: PMTiles;
-  constructor(url: string) {
-    this.p = new PMTiles(url);
-  }
-  async getTile(z: number, x: number, y: number) {
-    const r = await this.p.getZxy(z, x, y);
-    return r?.data;
-  }
+export interface ParseTileArgs {
+  z: number;
+  x: number;
+  y: number;
+  bytes: ArrayBuffer;
+  version: number;
+  schema: SchemaName;
+  /** "pmtiles" or "raw" — informational only; both code paths decode the same
+   *  pbf payload. Kept for symmetry with the worker RPC envelope. */
+  sourceKind: SourceKind;
 }
-
-class MVTSource implements TileSource {
-  constructor(private readonly urlTemplate: string) {}
-  async getTile(z: number, x: number, y: number) {
-    const url = this.urlTemplate
-      .replace("{z}", String(z))
-      .replace("{x}", String(x))
-      .replace("{y}", String(y));
-    const res = await fetch(url);
-    if (!res.ok) {
-      if (res.status === 404) return undefined;
-      throw new Error(`tile fetch ${res.status} for ${z}/${x}/${y}`);
-    }
-    return res.arrayBuffer();
-  }
-}
-
-let source: TileSource | null = null;
-let schema: Schema = openmaptiles;
-let sceneOrigin: { x: number; y: number } | null = null;
-let ribbonConfigs: Partial<Record<LayerName, RibbonConfig>> = {};
 
 const LAYER_NAMES: LayerName[] = [
   "earth",
@@ -93,10 +68,6 @@ const LAYER_NAMES: LayerName[] = [
 // ────────────────────────────────────────────────────────────────────────────
 // MVT parsing — SoA pack with multi-part line split.
 // ────────────────────────────────────────────────────────────────────────────
-
-interface Ring {
-  flat: number[];
-}
 
 function ringArea(flat: number[]): number {
   let a = 0;
@@ -230,18 +201,70 @@ function triangulateAndAppend(
   for (let i = 0; i < tri.length; i++) accum.indices.push(baseVertex + tri[i]);
 }
 
-function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedTile {
-  // Tiger Style: assert all coords entering from untrusted RPC payload.
+function synthEarthQuad(box: MetersBox): LayerGeometry {
+  // Four corners CCW (under our north→-Z scene), one triangle pair.
+  const positions = new Float32Array([
+    box.minX, box.minY,
+    box.maxX, box.minY,
+    box.maxX, box.maxY,
+    box.minX, box.maxY,
+  ]);
+  const indices = new Uint32Array([0, 1, 2, 0, 2, 3]);
+  return {
+    kind: "polygon",
+    positions,
+    indices,
+    featureStart: new Uint32Array([0, 6]),
+    featureIds: new Uint32Array([0]),
+    featureClass: new Uint8Array([1]),
+    featureHeight: new Float32Array([0]),
+    featureMinHeight: new Float32Array([0]),
+  };
+}
+
+export function approximateByteSize(t: ParsedTile): number {
+  let n = 0;
+  for (const k in t.layers) {
+    const g = t.layers[k as LayerName]!;
+    n += g.positions.byteLength;
+    n += g.indices?.byteLength ?? 0;
+    n += g.featureStart.byteLength;
+    n += g.featureIds.byteLength;
+    n += g.featureClass.byteLength;
+    n += g.featureHeight.byteLength;
+    n += g.featureMinHeight.byteLength;
+  }
+  n += JSON.stringify(t.attributes).length * 2;
+  return n;
+}
+
+/**
+ * Decode an MVT tile payload into our SoA ParsedTile. Pure and synchronous —
+ * safe to call from a Web Worker, Node service, or unit test. Every argument
+ * is treated as untrusted (numeric ranges asserted; oversized buffers rejected).
+ */
+export function parseTile(args: ParseTileArgs): ParsedTile {
+  // Tiger Style: validate every field on the entry. Untrusted RPC payload.
+  assert(args !== null && typeof args === "object", "parseTile args");
+  const { z, x, y, bytes, version, schema: schemaName, sourceKind } = args;
   assertU32(z, "z");
   assertU32(x, "x");
   assertU32(y, "y");
+  assertU32(version, "version");
   assertInRange(z, 0, MAX_TILE_ZOOM, "z range");
   const tilesPerAxis = 1 << z;
   assertInRange(x, 0, tilesPerAxis - 1, "x range");
   assertInRange(y, 0, tilesPerAxis - 1, "y range");
+  assert(bytes instanceof ArrayBuffer, "bytes ArrayBuffer");
   assert(bytes.byteLength > 0, "tile bytes nonempty");
   assert(bytes.byteLength <= MAX_TILE_BYTES, "tile bytes cap");
+  assert(
+    schemaName === "openmaptiles" || schemaName === "protomaps-v4",
+    "schema name",
+  );
+  assert(sourceKind === "pmtiles" || sourceKind === "raw", "sourceKind");
 
+  const schema: Schema = schemaName === "openmaptiles" ? openmaptiles : protomapsV4;
   const box = tileMetersBox(z, x, y);
   // OpenFreeMap serves gzip; the browser usually decompresses, but bare bytes
   // (range reads from PMTiles or proxies that pass-through gzip) can land here
@@ -258,7 +281,7 @@ function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedT
     z,
     x,
     y,
-    version: 1,
+    version,
     layers: {},
     attributes: {},
     byteSize: 0,
@@ -394,164 +417,6 @@ function parseTile(z: number, x: number, y: number, bytes: ArrayBuffer): ParsedT
     out.layers.earth = synthEarthQuad(box);
   }
 
-  // Bake the 3D ribbon meshes here (off the main thread) for any line layer
-  // with a registered config. The main thread just uploads the buffers.
-  if (sceneOrigin) {
-    const baked: Partial<Record<LayerName, BakedLineMesh>> = {};
-    for (const ln in ribbonConfigs) {
-      const cfg = ribbonConfigs[ln as LayerName];
-      const g = out.layers[ln as LayerName];
-      if (!cfg || !g || g.kind !== "line") continue;
-      const m = bakeRibbonMesh(g, sceneOrigin, cfg);
-      if (m) baked[ln as LayerName] = m;
-    }
-    if (Object.keys(baked).length > 0) out.bakedLines = baked;
-  }
-
   out.byteSize = approximateByteSize(out);
   return out;
-}
-
-function synthEarthQuad(box: MetersBox): LayerGeometry {
-  // Four corners CCW (under our north→-Z scene), one triangle pair.
-  const positions = new Float32Array([
-    box.minX, box.minY,
-    box.maxX, box.minY,
-    box.maxX, box.maxY,
-    box.minX, box.maxY,
-  ]);
-  const indices = new Uint32Array([0, 1, 2, 0, 2, 3]);
-  return {
-    kind: "polygon",
-    positions,
-    indices,
-    featureStart: new Uint32Array([0, 6]),
-    featureIds: new Uint32Array([0]),
-    featureClass: new Uint8Array([1]),
-    featureHeight: new Float32Array([0]),
-    featureMinHeight: new Float32Array([0]),
-  };
-}
-
-function approximateByteSize(t: ParsedTile): number {
-  let n = 0;
-  for (const k in t.layers) {
-    const g = t.layers[k as LayerName]!;
-    n += g.positions.byteLength;
-    n += g.indices?.byteLength ?? 0;
-    n += g.featureStart.byteLength;
-    n += g.featureIds.byteLength;
-    n += g.featureClass.byteLength;
-    n += g.featureHeight.byteLength;
-    n += g.featureMinHeight.byteLength;
-  }
-  n += JSON.stringify(t.attributes).length * 2;
-  return n;
-}
-
-function transferablesOf(t: ParsedTile): Transferable[] {
-  const out: Transferable[] = [];
-  for (const k in t.layers) {
-    const g = t.layers[k as LayerName]!;
-    out.push(g.positions.buffer);
-    if (g.indices) out.push(g.indices.buffer);
-    out.push(g.featureStart.buffer);
-    out.push(g.featureIds.buffer);
-    out.push(g.featureClass.buffer);
-    out.push(g.featureHeight.buffer);
-    out.push(g.featureMinHeight.buffer);
-  }
-  if (t.bakedLines) {
-    for (const k in t.bakedLines) {
-      const m = t.bakedLines[k as LayerName];
-      if (!m) continue;
-      out.push(m.positions.buffer);
-      out.push(m.indices.buffer);
-      if (m.uvs) out.push(m.uvs.buffer);
-      out.push(m.featureRanges.buffer);
-      out.push(m.featureIds.buffer);
-    }
-  }
-  return out;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// RPC
-// ────────────────────────────────────────────────────────────────────────────
-
-interface InitPayload {
-  source: { kind: "pmtiles"; url: string } | { kind: "mvt"; urlTemplate: string };
-  schema: "openmaptiles" | "protomaps-v4";
-  cacheVersion: number;
-  sceneOrigin?: { x: number; y: number };
-  ribbonConfigs?: Partial<Record<LayerName, RibbonConfig>>;
-}
-
-ctx.onmessage = async (e: MessageEvent<WorkerRequest>) => {
-  // Tiger Style: validate every field on the message handler entry. The
-  // payload is bytes from another realm; treat it as untrusted.
-  assert(e.data !== null && typeof e.data === "object", "msg envelope");
-  const { id, type, payload } = e.data;
-  assertU32(id, "msg id");
-  assert(typeof type === "string" && type.length > 0, "msg type string");
-  try {
-    if (type === "init") {
-      assert(payload !== null && typeof payload === "object", "init payload");
-      const p = payload as InitPayload;
-      assert(
-        p.source.kind === "pmtiles" || p.source.kind === "mvt",
-        "init.source.kind",
-      );
-      source =
-        p.source.kind === "pmtiles" ? new PMTilesSource(p.source.url) : new MVTSource(p.source.urlTemplate);
-      assert(
-        p.schema === "openmaptiles" || p.schema === "protomaps-v4",
-        "init.schema",
-      );
-      schema = p.schema === "openmaptiles" ? openmaptiles : protomapsV4;
-      if (p.sceneOrigin) {
-        assertFinite(p.sceneOrigin.x, "sceneOrigin.x");
-        assertFinite(p.sceneOrigin.y, "sceneOrigin.y");
-        sceneOrigin = p.sceneOrigin;
-      }
-      if (p.ribbonConfigs) ribbonConfigs = p.ribbonConfigs;
-      reply(id, true, { ok: true });
-    } else if (type === "fetchTile") {
-      if (!source) throw new Error("worker not initialised");
-      assert(payload !== null && typeof payload === "object", "fetchTile payload");
-      const { z, x, y } = payload as { z: number; x: number; y: number };
-      assertU32(z, "fetchTile.z");
-      assertU32(x, "fetchTile.x");
-      assertU32(y, "fetchTile.y");
-      assertInRange(z, 0, MAX_TILE_ZOOM, "fetchTile.z range");
-      const axis = 1 << z;
-      assertInRange(x, 0, axis - 1, "fetchTile.x range");
-      assertInRange(y, 0, axis - 1, "fetchTile.y range");
-      const bytes = await source.getTile(z, x, y);
-      if (!bytes) {
-        reply(id, true, { missing: true, z, x, y });
-        return;
-      }
-      assert(bytes.byteLength > 0, "fetched tile bytes");
-      assert(bytes.byteLength <= MAX_TILE_BYTES, "fetched tile bytes cap");
-      const parsed = parseTile(z, x, y, bytes);
-      reply(id, true, { tile: parsed, missing: false }, transferablesOf(parsed));
-    } else {
-      throw new Error(`unknown message: ${type}`);
-    }
-  } catch (err) {
-    // Surface, never swallow. The pool rejects the matching pending RPC.
-    reply(id, false, undefined, [], err instanceof Error ? err.message : String(err));
-  }
-};
-
-function reply(
-  id: number,
-  ok: boolean,
-  result?: unknown,
-  transfer: Transferable[] = [],
-  error?: string,
-) {
-  const msg: WorkerResponse = { id, ok, result, error };
-  ctx.postMessage(msg, transfer);
 }

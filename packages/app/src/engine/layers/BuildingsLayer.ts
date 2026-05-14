@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { assert, assertU32, checkLoopBound } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
+import type { LayerGeometry, LayerName, ParsedTile } from "@map3d/data-core";
 import { extrudePolygons, MAX_FEATURES_PER_TILE, MAX_VERTICES_PER_TILE } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
 

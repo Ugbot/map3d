@@ -5,11 +5,18 @@
 // drown the scene.
 
 import * as THREE from "three";
-import { assert, assertFinite, assertU32, checkLoopBound } from "@map3d/data-core";
+import {
+  assert,
+  assertFinite,
+  assertU32,
+  checkLoopBound,
+  PoiColor,
+  type LayerGeometry,
+  type LayerName,
+  type ParsedTile,
+} from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { makeGlowMaterial } from "./glowMaterial";
-import { PoiColor } from "../../cache/classes";
 import { assertOrigin, MAX_FEATURES_PER_TILE } from "./util";
 
 interface PoiHandle extends TileMeshHandle {

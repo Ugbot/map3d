@@ -1,7 +1,7 @@
 // Protomaps v4 vector tile schema. `kind` is a coarse bucket (e.g.
 // "major_road", "rail", "path"); `kind_detail` is the original OSM tag.
 
-import type { LayerName } from "../../cache/types";
+import type { LayerName } from "../types";
 import {
   classifyRoad,
   classifyRail,
@@ -11,7 +11,7 @@ import {
   classifyWaterway,
   PoiClass,
   BuildingClass,
-} from "../../cache/classes";
+} from "../classes";
 import type { Schema, SchemaFeatureProps } from "./types";
 
 const ALIASES: Record<LayerName, readonly string[]> = {

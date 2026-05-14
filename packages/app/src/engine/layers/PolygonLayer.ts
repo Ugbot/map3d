@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import { assertU32 } from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
+import type { LayerGeometry, LayerName, ParsedTile } from "@map3d/data-core";
 import { flatPolygonGeometry, assertOrigin } from "./util";
 import { makeGlowMaterial } from "./glowMaterial";
 

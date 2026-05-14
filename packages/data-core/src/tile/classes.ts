@@ -1,7 +1,7 @@
 // Numeric class enums per layer. Workers tag each feature with a small int
 // instead of a string, so the renderer can branch/pick colour with O(1) lookups.
 
-import { assert, assertFinite, assertInRange } from "@map3d/data-core";
+import { assert, assertFinite, assertInRange } from "../util/assert";
 
 // Public classifier contract: input is the raw tag string from the source
 // vector tile (potentially undefined). We assert the type invariant — bad

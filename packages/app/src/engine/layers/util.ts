@@ -7,7 +7,7 @@ import {
   assertU32,
   checkLoopBound,
 } from "@map3d/data-core";
-import type { LayerGeometry } from "../../cache/types";
+import type { LayerGeometry } from "@map3d/data-core";
 
 export interface Origin {
   x: number;

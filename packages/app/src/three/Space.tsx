@@ -8,7 +8,7 @@ import { useLayerStore } from "@/state/layerStore";
 import { useTimeStore } from "@/state/timeStore";
 import { useProviderStore } from "@/state/providerStore";
 import { Engine } from "@/engine/Engine";
-import type { LayerName } from "@/cache/types";
+import type { LayerName } from "@map3d/data-core";
 import { InfoPopup } from "@/ui/InfoPopup";
 import { DebugHUD } from "@/ui/DebugHUD";
 

@@ -14,9 +14,8 @@ import { StreetLightsLayer } from "./layers/StreetLightsLayer";
 import { TileManager } from "./TileManager";
 import { createAllLayers, ribbonConfigsForWorker } from "./layers";
 import type { Layer } from "./Layer";
-import type { LayerName } from "../cache/types";
-import { tileCache, makeVersion } from "../cache/tileCache";
-import { WorkerPool } from "../workers/pool";
+import type { LayerName } from "@map3d/data-core";
+import { tileCache, makeVersion, WorkerPool } from "@map3d/data-core";
 import { Sun } from "./time/Sun";
 import { SimRenderer } from "./sim/SimRenderer";
 import { KeyboardController } from "./controls/KeyboardController";
@@ -150,7 +149,7 @@ export class Engine {
 
     this.workers = new WorkerPool(
       () =>
-        new Worker(new URL("../workers/tileFetch.worker.ts", import.meta.url), {
+        new Worker(new URL("../workers/tileWorker.entry.ts", import.meta.url), {
           type: "module",
         }),
     );

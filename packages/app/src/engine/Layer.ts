@@ -5,7 +5,7 @@
 // substitute remote-rendered layers in later.
 
 import type { Group, Material } from "three";
-import type { LayerGeometry, LayerName, ParsedTile } from "../cache/types";
+import type { LayerGeometry, LayerName, ParsedTile } from "@map3d/data-core";
 
 export interface LayerContext {
   // Origin (in mercator metres) the engine has chosen for scene-local coords.

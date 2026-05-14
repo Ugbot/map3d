@@ -1,35 +1,6 @@
 #include <city.h>
 #include "bridge.h"
 
-#ifdef BEAM_DRIVEN
-/* When the bridge is driving the sim from JS, neuter the built-in procedural
- * traffic emitters so we don't double-up cars on the same roads. We do this
- * by clearing CityTraffic on every City entity after scene load — the
- * SetCity hook reads traffic.frequency to decide whether to spawn emitters,
- * so we have to re-trigger it after the mutation. */
-static void suppress_procedural_traffic(ecs_world_t *world) {
-    ecs_query_t *q = ecs_query(world, {
-        .terms = {{ .id = ecs_id(City) }}
-    });
-    ecs_assert(q != NULL, ECS_INTERNAL_ERROR, NULL);
-
-    ecs_iter_t it = ecs_query_iter(world, q);
-    while (ecs_query_next(&it)) {
-        City *cities = ecs_field(&it, City, 0);
-        for (int i = 0; i < it.count; i ++) {
-            cities[i].traffic.frequency = 0.0f;
-            cities[i].traffic.chance = 0.0f;
-        }
-    }
-    ecs_query_fini(q);
-
-    /* Delete any emitters/cars already spawned by the SetCity hook (it ran
-     * synchronously during ecs_script_run_file above). The CityTrafficEmitter
-     * symbol is module-internal, so we rely on the bridge clearing things
-     * later — for now, ExpireTraffic will eventually flush leftover cars. */
-}
-#endif
-
 int main(int argc, char *argv[]) {
     ecs_world_t *world = ecs_init();
 
@@ -49,13 +20,17 @@ int main(int argc, char *argv[]) {
     ECS_IMPORT(world, FlecsCityBridge);
 
     ecs_time_t t = {0}; ecs_time_measure(&t);
-    ecs_script_run_file(world, "etc/assets/scene.flecs");
-    printf("scene loaded in %fs\n", ecs_time_measure(&t));
 
 #ifdef BEAM_DRIVEN
-    suppress_procedural_traffic(world);
+    /* Skip scene.flecs entirely — it instantiates a City entity which fires
+     * SetCity's procedural generator. The bridge will stream real OSM tile
+     * geometry instead. We still need beam_init() to register the bridge's
+     * components + sun-sync system. */
     beam_init();
+    printf("scene skipped (beam-driven) — bridge will populate world\n");
 #else
+    ecs_script_run_file(world, "etc/assets/scene.flecs");
+    printf("scene loaded in %fs\n", ecs_time_measure(&t));
     /* Prewarm simulation so there's cars everywhere */
     for (int i = 0; i < 5000; i ++) {
         ecs_progress(world, 0.16);

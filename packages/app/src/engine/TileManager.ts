@@ -15,9 +15,8 @@
 import { lonLatToTile, tileMetersBox, tileKey, lonLatToMeters } from "../projection/mercator";
 import type { Layer } from "./Layer";
 import type { LayerContext } from "./Layer";
-import type { LayerName, ParsedTile } from "../cache/types";
-import type { TileStore } from "../cache/types";
-import { WorkerPool } from "../workers/pool";
+import type { LayerName, ParsedTile, TileStore } from "@map3d/data-core";
+import { WorkerPool } from "@map3d/data-core";
 import { DERIVED_SOURCES } from "./layers";
 import {
   assert,

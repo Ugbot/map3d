@@ -6,7 +6,7 @@ import {
   type GroupName,
   type PresetName,
 } from "@/state/layerStore";
-import type { LayerName } from "@/cache/types";
+import type { LayerName } from "@map3d/data-core";
 
 // Friendlier labels. Internal LayerName remains for code; this is what users see.
 const LABELS: Record<LayerName, string> = {

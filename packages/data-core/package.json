@@ -13,16 +13,25 @@
     "./time": "./src/time/SunCalc.ts",
     "./state": "./src/state/WorldState.ts",
     "./codec": "./src/codec/FrameCodec.ts",
-    "./transport": "./src/transport/Transport.ts"
+    "./transport": "./src/transport/Transport.ts",
+    "./tile": "./src/tile/index.ts"
   },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "@types/earcut": "^3.0.0",
+    "@types/mapbox__vector-tile": "^1.3.4",
     "vitest": "^4.1.6"
   },
   "dependencies": {
-    "bitecs": "^0.4.0"
+    "@mapbox/vector-tile": "^2.0.4",
+    "bitecs": "^0.4.0",
+    "earcut": "^3.0.2",
+    "fflate": "^0.8.2",
+    "idb": "^8.0.3",
+    "pbf": "^4.0.1",
+    "pmtiles": "^4.4.1"
   }
 }

@@ -14,8 +14,8 @@ import {
   assertU32,
   assertFinite,
   checkLoopBound,
-} from "@map3d/data-core";
-import type { LayerGeometry } from "../cache/types";
+} from "../util/assert";
+import type { LayerGeometry } from "./types";
 
 // Tiger Style bounds — generous, but ensure a malformed tile cannot push us
 // into a runaway alloc. See tileFetch.worker.ts for the matching caps.

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
-import type { LayerName } from "@/cache/types";
+import type { LayerName } from "@map3d/data-core";
 import type { Engine } from "@/engine/Engine";
 
 interface Props {

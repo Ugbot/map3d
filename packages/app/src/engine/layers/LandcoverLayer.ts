@@ -2,11 +2,17 @@
 // from the LandcoverColor palette by the feature's class.
 
 import * as THREE from "three";
-import { assert, assertU32, checkLoopBound } from "@map3d/data-core";
+import {
+  assert,
+  assertU32,
+  checkLoopBound,
+  LandcoverColor,
+  type LayerGeometry,
+  type LayerName,
+  type ParsedTile,
+} from "@map3d/data-core";
 import type { Layer, LayerContext, TileMeshHandle } from "../Layer";
-import type { LayerGeometry, LayerName, ParsedTile } from "../../cache/types";
 import { makeGlowMaterial } from "./glowMaterial";
-import { LandcoverColor } from "../../cache/classes";
 import {
   assertLayerGeometry,
   assertOrigin,

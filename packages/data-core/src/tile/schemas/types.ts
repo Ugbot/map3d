@@ -2,7 +2,7 @@
 // numbers. Each provider's schema implements this interface; the worker is
 // otherwise schema-agnostic.
 
-import type { LayerName } from "../../cache/types";
+import type { LayerName } from "../types";
 
 export interface SchemaFeatureProps {
   // MVT feature.properties as plain object.

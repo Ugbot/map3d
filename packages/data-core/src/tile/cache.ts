@@ -14,7 +14,7 @@ import {
   assertFinite,
   assertInRange,
   checkLoopBound,
-} from "@map3d/data-core";
+} from "../util/assert";
 import type { ParsedTile, RawTile, TileStore } from "./types";
 
 const DB_NAME = "map3d-tiles";

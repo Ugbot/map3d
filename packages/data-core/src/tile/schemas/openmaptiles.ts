@@ -8,7 +8,7 @@
 //   transportation   (lines; class — motorway, primary, ..., rail, path, ...)
 //   poi              (points; class — restaurant, hospital, ...)
 
-import type { LayerName } from "../../cache/types";
+import type { LayerName } from "../types";
 import {
   RoadClass,
   RailClass,
@@ -18,7 +18,7 @@ import {
   classifyWaterway,
   classifyPoiOMT,
   BuildingClass,
-} from "../../cache/classes";
+} from "../classes";
 import type { Schema, SchemaFeatureProps } from "./types";
 
 const ALIASES: Record<LayerName, readonly string[]> = {
